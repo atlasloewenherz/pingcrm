@@ -1,0 +1,38 @@
+{
+  "task": "event_classifier",
+  "model_role": "LLM_MODEL_DRAFT",
+  "description": "Classify a contact's tweet into a structured relationship event.",
+  "input": {
+    "tweet_text": "Thrilled to announce we've raised a $12M Series A led by Matrix to build the future of developer tools!",
+    "contact_name": "Ada Lovelace"
+  },
+  "fake_response": "{\"event_type\": \"fundraising\", \"confidence\": 0.93, \"summary\": \"Ada's company announced a $12M Series A led by Matrix.\"}",
+  "expected": {
+    "type": "object",
+    "required_keys": [
+      "event_type",
+      "confidence",
+      "summary"
+    ],
+    "valid_event_types": [
+      "job_change",
+      "fundraising",
+      "product_launch",
+      "promotion",
+      "milestone",
+      "event_attendance",
+      "none"
+    ],
+    "event_type": "fundraising",
+    "confidence_min": 0.5,
+    "keyword_groups": [
+      [
+        "series a",
+        "raise",
+        "raised",
+        "funding",
+        "fund"
+      ]
+    ]
+  }
+}

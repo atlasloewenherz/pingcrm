@@ -1,0 +1,55 @@
+{
+  "task": "meeting_prep",
+  "model_role": "LLM_MODEL_FAST",
+  "description": "Generate talking points for an upcoming meeting from attendee briefs.",
+  "input": {
+    "meeting_title": "Catch-up with Ada and Grace",
+    "briefs": [
+      {
+        "name": "Ada Lovelace",
+        "title": "Founder & CTO",
+        "company": "Analytical Engines",
+        "score_label": "Strong",
+        "twitter_bio": "Building the Analytical Engine and scaling the team.",
+        "recent_interactions": [
+          {
+            "platform": "email",
+            "preview": "Congrats on the Series A and the new engine launch."
+          }
+        ]
+      },
+      {
+        "name": "Grace Hopper",
+        "title": "Compiler Lead",
+        "company": "Navy Research",
+        "score_label": "Warm",
+        "linkedin_headline": "Leading the COBOL compiler effort.",
+        "recent_interactions": [
+          {
+            "platform": "twitter",
+            "preview": "Excited to share our compiler debugging talk."
+          }
+        ]
+      }
+    ]
+  },
+  "fake_response": "- Ada Lovelace is scaling Analytical Engines after the Series A, so ask how the engine launch is going.\n- Grace Hopper leads the COBOL compiler effort, so reconnect on compiler tooling and her recent talk.",
+  "expected": {
+    "type": "text",
+    "min_length": 60,
+    "keyword_groups": [
+      [
+        "ada"
+      ],
+      [
+        "grace"
+      ],
+      [
+        "engine",
+        "compiler",
+        "series a",
+        "cobol"
+      ]
+    ]
+  }
+}

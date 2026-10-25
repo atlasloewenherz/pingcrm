@@ -1,0 +1,42 @@
+name: LLM golden eval
+
+on:
+  pull_request:
+    paths:
+      - "backend/app/services/llm.py"
+      - "backend/app/core/config.py"
+      - "backend/app/core/celery_app.py"
+      - "backend/app/services/message_composer.py"
+      - "backend/app/services/event_classifier.py"
+      - "backend/app/services/auto_tagger.py"
+      - "backend/app/services/bio_extractor.py"
+      - "backend/app/services/meeting_prep.py"
+  issue_comment:
+    types: [created]
+
+jobs:
+  eval:
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/run-llm-eval') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || github.head_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r backend/requirements.txt -r backend/requirements-test.txt
+      - name: Run golden eval
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::error::ANTHROPIC_API_KEY not configured — required for changes touching LLM code. A maintainer must comment /run-llm-eval once a key is available."
+            exit 1
+          fi
+          cd backend && pytest -m eval tests/eval_llm_golden.py
