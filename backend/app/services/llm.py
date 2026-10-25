@@ -144,6 +144,114 @@ class AnthropicAdapter:
         raise LLMError("Anthropic response contained no text content block")
 
 
+_OPENAI_COMPATIBLE_PREFIXES = ("openai/", "ollama/", "vllm/")
+
+
+class OpenAICompatibleAdapter:
+    """Any backend exposing OpenAI's ``/v1/chat/completions`` shape."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "",
+        api_key: str = "",
+    ) -> None:
+        from openai import AsyncOpenAI  # noqa: PLC0415
+
+        if not api_key:
+            if settings.LLM_ALLOW_EMPTY_KEY:
+                # Local Ollama/vLLM servers reject an empty key at SDK
+                # construction; the server ignores the value itself.
+                api_key = "not-needed"
+            else:
+                raise ValueError(
+                    "LLM_API_KEY is empty for an OpenAI-compatible provider. "
+                    "Set LLM_API_KEY, or set LLM_ALLOW_EMPTY_KEY=true if this "
+                    "is a self-hosted server that does not require auth. "
+                    "See docs/docs/setup.md."
+                )
+
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = AsyncOpenAI(**client_kwargs)
+        self._semaphore = asyncio.Semaphore(settings.LLM_MAX_CONCURRENCY)
+        # Models that rejected response_format. Process-lifetime cache by
+        # design (see the plan's trade-off note): the only staleness cost is
+        # one wasted round-trip per restart, never incorrect output.
+        self._no_structured_output: set[str] = set()
+
+    async def complete(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        import openai  # noqa: PLC0415
+
+        if any(message.get("role") == "system" for message in messages):
+            raise ValueError(
+                "messages must not contain a system message; pass "
+                "system_prompt= instead (it is inserted as messages[0])."
+            )
+
+        bare_model = model
+        for prefix in _OPENAI_COMPATIBLE_PREFIXES:
+            if bare_model.startswith(prefix):
+                bare_model = bare_model[len(prefix):]
+                break
+
+        request_messages = list(messages)
+        if system_prompt:
+            request_messages.insert(0, {"role": "system", "content": system_prompt})
+
+        kwargs: dict[str, Any] = {
+            "model": bare_model,
+            "max_tokens": max_tokens,
+            "messages": request_messages,
+            "timeout": settings.LLM_TIMEOUT if timeout is None else timeout,
+        }
+        wants_structured = (
+            response_format is not None
+            and settings.LLM_STRUCTURED_OUTPUT != "none"
+            and bare_model not in self._no_structured_output
+        )
+        if wants_structured:
+            kwargs["response_format"] = response_format
+
+        try:
+            async with self._semaphore:
+                try:
+                    response = await self._client.chat.completions.create(**kwargs)
+                except openai.APIStatusError as exc:
+                    if not wants_structured or exc.status_code not in (400, 422):
+                        raise
+                    logger.warning(
+                        "OpenAI-compatible model %r rejected response_format "
+                        "(status %d); retrying without it and caching the "
+                        "rejection for this process.",
+                        bare_model,
+                        exc.status_code,
+                    )
+                    self._no_structured_output.add(bare_model)
+                    kwargs.pop("response_format", None)
+                    response = await self._client.chat.completions.create(**kwargs)
+        except openai.APIStatusError as exc:
+            raise LLMError(str(exc), status_code=exc.status_code) from exc
+        except openai.APIConnectionError as exc:
+            raise LLMError(f"OpenAI-compatible connection error: {exc}") from exc
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise LLMError(f"OpenAI-compatible request timed out: {exc}") from exc
+
+        if not response.choices:
+            raise LLMError("OpenAI-compatible response contained no choices")
+        return response.choices[0].message.content or ""
+
+
 async def complete_with_retry(client: LLMClient, **kwargs: Any) -> str:
     """Call ``client.complete`` with exponential backoff on transient errors.
 
