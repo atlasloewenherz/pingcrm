@@ -113,7 +113,9 @@ TELEGRAM_API_ID=your_api_id
 TELEGRAM_API_HASH=your_api_hash
 ```
 
-### Anthropic / Claude AI
+### LLM Provider (Anthropic / OpenAI-compatible)
+
+AI features need one LLM provider. Anthropic is the default:
 
 1. Go to [Anthropic Console](https://console.anthropic.com/)
 2. Create an API key
@@ -121,7 +123,46 @@ TELEGRAM_API_HASH=your_api_hash
 
 ```env
 ANTHROPIC_API_KEY=your_api_key
+# Or, preferred going forward (takes precedence for Anthropic):
+# LLM_API_KEY=your_api_key
 ```
+
+The provider is derived from the prefix of `LLM_MODEL_DRAFT` and
+`LLM_MODEL_FAST` — `anthropic/`, `openai/`, `ollama/`, or `vllm/`, for example:
+
+```env
+LLM_MODEL_DRAFT=anthropic/claude-sonnet-4-6
+LLM_MODEL_FAST=anthropic/claude-haiku-4-5-20251001
+```
+
+There is no separate provider flag; an unrecognized prefix fails at startup in
+both the API and Celery worker processes, so a misconfiguration never routes
+traffic to the wrong backend. Anthropic is the documented default, but any
+OpenAI-compatible server (OpenAI, Ollama, vLLM, ...) can be used by setting
+`LLM_BASE_URL` and prefixing both model IDs accordingly.
+
+#### Self-hosted / OpenAI-compatible providers
+
+```env
+LLM_BASE_URL=http://ollama:11434/v1   # Compose service name, LAN IP, or cluster DNS
+LLM_API_KEY=                          # empty for a no-auth local server
+LLM_MODEL_DRAFT=ollama/llama3
+LLM_MODEL_FAST=ollama/llama3
+LLM_ALLOW_EMPTY_KEY=true
+```
+
+Set `LLM_ALLOW_EMPTY_KEY=true` **only** when the endpoint is self-hosted on
+localhost, a trusted LAN, or a private cluster network and does not require
+authentication. Against a remote endpoint that requires a key, leaving the key
+empty with this flag enabled turns a clear construction-time error into an
+opaque `401`.
+
+#### Concurrency
+
+`LLM_MAX_CONCURRENCY` (default `5`) caps in-flight requests per provider
+configuration and is shared by every service using that config. To match the
+previous combined peak concurrency across event classification and auto-tagging,
+set `LLM_MAX_CONCURRENCY=10`.
 
 ---
 
@@ -225,7 +266,13 @@ celery -A worker.celery_app worker --loglevel=info
 | `TWITTER_API_SECRET` | No | Twitter API v2 secret |
 | `TELEGRAM_API_ID` | No | Telegram MTProto API ID |
 | `TELEGRAM_API_HASH` | No | Telegram MTProto API hash |
-| `ANTHROPIC_API_KEY` | No | Anthropic API key for Claude |
+| `ANTHROPIC_API_KEY` | No | Legacy Anthropic API key (still honoured; `LLM_API_KEY` takes precedence) |
+| `LLM_API_KEY` | No | API key for the configured LLM provider (Anthropic or OpenAI-compatible) |
+| `LLM_BASE_URL` | No | Base URL for an OpenAI-compatible provider; blank uses the provider default |
+| `LLM_MODEL_DRAFT` | No | Drafting model, prefixed with `anthropic/`, `openai/`, `ollama/`, or `vllm/` (default: `anthropic/claude-sonnet-4-6`) |
+| `LLM_MODEL_FAST` | No | Fast model for classification/extraction, same prefix convention (default: `anthropic/claude-haiku-4-5-20251001`) |
+| `LLM_ALLOW_EMPTY_KEY` | No | Allow an empty key for a self-hosted, no-auth OpenAI-compatible server (default: `false`) |
+| `LLM_MAX_CONCURRENCY` | No | Per-provider in-flight request cap shared across services (default: `5`; set `10` to match prior peak) |
 | `APOLLO_API_KEY` | No | Apollo API key for contact enrichment |
 | `MAPBOX_SECRET_TOKEN` | No | Mapbox token used by the worker for geocoding (see [Map](features/map.md#configuration)) |
 | `MAPBOX_PUBLIC_TOKEN` | No | Mapbox token surfaced to the browser via `/api/v1/map/config` |
