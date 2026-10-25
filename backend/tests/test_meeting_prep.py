@@ -295,17 +295,12 @@ class TestBuildPrepBrief:
 
 class TestGenerateTalkingPoints:
     @pytest.mark.asyncio
-    @patch("app.services.meeting_prep._call_anthropic_with_retry")
-    @patch("app.services.meeting_prep.settings")
-    async def test_returns_talking_points(self, mock_settings, mock_api_call):
+    async def test_returns_talking_points(self, fake_llm_client):
         """Successful API call returns the AI-generated text."""
+        from app.core.config import settings
         from app.services.meeting_prep import generate_talking_points
 
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="- Discuss product roadmap\n- Ask about Series B")]
-        mock_api_call.return_value = mock_response
+        fake_llm_client.response = "- Discuss product roadmap\n- Ask about Series B"
 
         briefs = [
             {
@@ -327,17 +322,18 @@ class TestGenerateTalkingPoints:
 
         assert "Discuss product roadmap" in result
         assert "Series B" in result
-        mock_api_call.assert_called_once()
+        call = fake_llm_client.last_call
+        assert call is not None
+        assert call["model"] == settings.LLM_MODEL_FAST
+        assert call["max_tokens"] == 300
 
     @pytest.mark.asyncio
-    @patch("app.services.meeting_prep._call_anthropic_with_retry")
-    @patch("app.services.meeting_prep.settings")
-    async def test_returns_empty_on_api_failure(self, mock_settings, mock_api_call):
+    async def test_returns_empty_on_api_failure(self, fake_llm_client):
         """API exception → graceful degradation, returns empty string."""
+        from app.services.llm import LLMError
         from app.services.meeting_prep import generate_talking_points
 
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        mock_api_call.side_effect = Exception("API unreachable")
+        fake_llm_client.responses = [LLMError("API unreachable", status_code=401)]
 
         briefs = [{"name": "Alice", "score_label": "Warm"}]
 
@@ -472,21 +468,14 @@ class TestMeetingPrepIntegration:
     """End-to-end test: build brief → talking points → compose email."""
 
     @pytest.mark.asyncio
-    @patch("app.services.meeting_prep._call_anthropic_with_retry")
-    @patch("app.services.meeting_prep.settings")
-    async def test_full_flow(self, mock_settings, mock_retry_call):
+    async def test_full_flow(self, fake_llm_client):
         from app.services.meeting_prep import (
             build_prep_brief,
             compose_prep_email,
             generate_talking_points,
         )
 
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        mock_settings.FRONTEND_URL = "https://pingcrm.example.com"
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="- Discuss project timeline\n- Ask about team expansion")]
-        mock_retry_call.return_value = mock_response
+        fake_llm_client.response = "- Discuss project timeline\n- Ask about team expansion"
 
         contact = _FakeContact(
             full_name="Alice Smith",

@@ -7,15 +7,14 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 
-import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.contact import Contact
 from app.models.interaction import Interaction
-from app.services.meeting_prep_email import compose_prep_email
 from app.services import llm
+from app.services.meeting_prep_email import compose_prep_email
 
 logger = logging.getLogger(__name__)
 
@@ -183,13 +182,10 @@ async def build_prep_brief(
 
 
 async def generate_talking_points(briefs: list[dict], meeting_title: str) -> str:
-    """Use Claude Haiku to generate concise talking points for a meeting.
+    """Use the configured fast model to generate concise talking points.
 
-    Returns the AI-generated text, or an empty string on failure / missing key.
+    Returns the AI-generated text, or an empty string on failure.
     """
-    if not settings.ANTHROPIC_API_KEY:
-        return ""
-
     # Build prompt from attendee briefs
     attendee_sections: list[str] = []
     for b in briefs:
@@ -249,8 +245,8 @@ Talking points:"""
         ).strip()
     except Exception:
         logger.exception(
-            "generate_talking_points: API call failed",
-            extra={"provider": "anthropic", "meeting_title": meeting_title},
+            "generate_talking_points: LLM API call failed",
+            extra={"model": settings.LLM_MODEL_FAST, "meeting_title": meeting_title},
         )
         return ""
 
