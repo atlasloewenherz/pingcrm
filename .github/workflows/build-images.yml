@@ -8,7 +8,7 @@ name: Build and push images to Harbor
 
 on:
   push:
-    branches: [main]
+    branches: [ordnung]
     paths:
       - "backend/**"
       - "frontend/**"
