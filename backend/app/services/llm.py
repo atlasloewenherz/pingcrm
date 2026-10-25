@@ -64,6 +64,86 @@ class LLMClient(Protocol):
         ...
 
 
+_anthropic_key_warned = False
+
+
+def _resolve_anthropic_api_key() -> str:
+    """``LLM_API_KEY``, else legacy ``ANTHROPIC_API_KEY`` (warn once), else ""."""
+    global _anthropic_key_warned
+
+    if settings.LLM_API_KEY:
+        return settings.LLM_API_KEY
+    if settings.ANTHROPIC_API_KEY:
+        if not _anthropic_key_warned:
+            logger.warning(
+                "LLM_API_KEY is not set; falling back to ANTHROPIC_API_KEY. "
+                "Set LLM_API_KEY to use a different Anthropic credential."
+            )
+            _anthropic_key_warned = True
+        return settings.ANTHROPIC_API_KEY
+    return ""
+
+
+class AnthropicAdapter:
+    """Native Anthropic backend (``/v1/messages``)."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "",
+        api_key: str | None = None,
+    ) -> None:
+        from anthropic import AsyncAnthropic  # noqa: PLC0415
+
+        key = _resolve_anthropic_api_key() if api_key is None else api_key
+        client_kwargs: dict[str, Any] = {"api_key": key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = AsyncAnthropic(**client_kwargs)
+        self._semaphore = asyncio.Semaphore(settings.LLM_MAX_CONCURRENCY)
+
+    async def complete(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str,
+        max_tokens: int,
+        system_prompt: str | None = None,
+        timeout: float | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        """Send a completion request, ignoring ``response_format``.
+
+        Anthropic's API has no ``response_format`` parameter; structured output
+        relies on prompt instructions plus application-side schema validation.
+        """
+        import anthropic  # noqa: PLC0415
+
+        kwargs: dict[str, Any] = {
+            "model": model.removeprefix("anthropic/"),
+            "max_tokens": max_tokens,
+            "messages": messages,
+            "timeout": settings.LLM_TIMEOUT if timeout is None else timeout,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+
+        try:
+            async with self._semaphore:
+                response = await self._client.messages.create(**kwargs)
+        except anthropic.APIStatusError as exc:
+            raise LLMError(str(exc), status_code=exc.status_code) from exc
+        except anthropic.APIConnectionError as exc:
+            raise LLMError(f"Anthropic connection error: {exc}") from exc
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise LLMError(f"Anthropic request timed out: {exc}") from exc
+
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                return block.text
+        raise LLMError("Anthropic response contained no text content block")
+
+
 async def complete_with_retry(client: LLMClient, **kwargs: Any) -> str:
     """Call ``client.complete`` with exponential backoff on transient errors.
 
