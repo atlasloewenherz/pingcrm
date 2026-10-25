@@ -345,11 +345,8 @@ async def test_apply_inline_tags_small_set(
     db.add_all([c1, c2])
     await db.commit()
 
-    # Mock anthropic client builder + assign_tags returns deterministic tags
+    # Mock assign_tags to return deterministic tags
     with patch(
-        "app.services.auto_tagger._get_anthropic_client",
-        return_value=MagicMock(),
-    ), patch(
         "app.services.auto_tagger.assign_tags",
         new=AsyncMock(return_value=["Eng"]),
     ):
@@ -385,9 +382,6 @@ async def test_apply_inline_skips_when_assign_returns_empty(
     await db.commit()
 
     with patch(
-        "app.services.auto_tagger._get_anthropic_client",
-        return_value=MagicMock(),
-    ), patch(
         "app.services.auto_tagger.assign_tags",
         new=AsyncMock(return_value=[]),
     ):
@@ -424,9 +418,6 @@ async def test_apply_defaults_to_all_user_contacts(
     await db.commit()
 
     with patch(
-        "app.services.auto_tagger._get_anthropic_client",
-        return_value=MagicMock(),
-    ), patch(
         "app.services.auto_tagger.assign_tags",
         new=AsyncMock(return_value=["Eng"]),
     ):

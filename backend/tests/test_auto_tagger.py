@@ -1,8 +1,7 @@
 """Tests for auto_tagger service."""
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
 
+from app.core.config import settings
 from app.services.auto_tagger import (
     _build_contact_summary,
     _parse_json_response,
@@ -10,6 +9,8 @@ from app.services.auto_tagger import (
     discover_taxonomy,
     merge_tags,
 )
+from app.services.llm import LLMError
+from tests.fakes import FakeLLMClient
 
 
 # ---------------------------------------------------------------------------
@@ -191,44 +192,38 @@ class TestParseJsonResponse:
 # discover_taxonomy
 # ---------------------------------------------------------------------------
 
-def _make_mock_client(response_text: str):
-    """Build a mock AsyncAnthropic client returning the given text."""
-    mock_content = MagicMock()
-    mock_content.text = response_text
 
-    mock_message = MagicMock()
-    mock_message.content = [mock_content]
+@pytest.fixture
+def failing_get_llm_client(monkeypatch):
+    """Make client construction fail, as it does when no credentials exist."""
+    async def _get(_model: str):
+        raise ValueError("no credentials configured")
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=mock_message)
-    return mock_client
+    monkeypatch.setattr("app.services.llm.get_llm_client", _get)
 
 
 @pytest.mark.asyncio
-async def test_discover_taxonomy_no_api_key():
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = ""
-        result = await discover_taxonomy([{"full_name": "Alice"}])
+async def test_discover_taxonomy_empty_contacts(fake_llm_client):
+    result = await discover_taxonomy([])
+
+    assert result == {}
+    assert fake_llm_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_discover_taxonomy_client_construction_failure_returns_empty(
+    failing_get_llm_client,
+):
+    result = await discover_taxonomy([{"full_name": "Alice"}])
+
     assert result == {}
 
 
 @pytest.mark.asyncio
-async def test_discover_taxonomy_empty_contacts():
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        result = await discover_taxonomy([])
-    assert result == {}
+async def test_discover_taxonomy_valid_response(fake_llm_client):
+    fake_llm_client.response = '{"Role": ["CEO", "CTO"], "Industry": ["Tech"]}'
 
-
-@pytest.mark.asyncio
-async def test_discover_taxonomy_valid_response():
-    taxonomy_json = '{"Role": ["CEO", "CTO"], "Industry": ["Tech"]}'
-    mock_client = _make_mock_client(taxonomy_json)
-
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        with patch("app.services.auto_tagger._get_anthropic_client", return_value=mock_client):
-            result = await discover_taxonomy([{"full_name": "Alice", "title": "CEO"}])
+    result = await discover_taxonomy([{"full_name": "Alice", "title": "CEO"}])
 
     assert "Role" in result
     assert "CEO" in result["Role"]
@@ -236,71 +231,47 @@ async def test_discover_taxonomy_valid_response():
     assert "Industry" in result
     assert "Tech" in result["Industry"]
 
+    call = fake_llm_client.last_call
+    assert call is not None
+    assert call["model"] == settings.LLM_MODEL_FAST
+    assert call["max_tokens"] == 2048
+
 
 @pytest.mark.asyncio
-async def test_discover_taxonomy_batching_60_contacts():
+async def test_discover_taxonomy_batching_60_contacts(fake_llm_client):
     """60 contacts with _BATCH_SIZE=50 should result in 2 API calls."""
-    taxonomy_json = '{"Role": ["Engineer"]}'
-    mock_client = _make_mock_client(taxonomy_json)
+    fake_llm_client.response = '{"Role": ["Engineer"]}'
 
     contacts = [{"full_name": f"Contact {i}"} for i in range(60)]
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        with patch("app.services.auto_tagger._get_anthropic_client", return_value=mock_client):
-            result = await discover_taxonomy(contacts)
+    result = await discover_taxonomy(contacts)
 
-    # Should have been called twice (batch 1: 50 contacts, batch 2: 10 contacts)
-    assert mock_client.messages.create.call_count == 2
+    assert len(fake_llm_client.calls) == 2
     assert "Role" in result
     assert "Engineer" in result["Role"]
 
 
 @pytest.mark.asyncio
-async def test_discover_taxonomy_first_batch_failure_raises():
+async def test_discover_taxonomy_first_batch_failure_raises(fake_llm_client):
     """If the first batch API call raises, discover_taxonomy must propagate the exception."""
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(side_effect=RuntimeError("API down"))
+    fake_llm_client.responses = [LLMError("API down", status_code=400)]
 
-    contacts = [{"full_name": "Alice"}]
-
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        with patch("app.services.auto_tagger._get_anthropic_client", return_value=mock_client):
-            with pytest.raises(RuntimeError, match="API down"):
-                await discover_taxonomy(contacts)
+    with pytest.raises(LLMError, match="API down"):
+        await discover_taxonomy([{"full_name": "Alice"}])
 
 
 @pytest.mark.asyncio
-async def test_discover_taxonomy_second_batch_failure_continues():
+async def test_discover_taxonomy_second_batch_failure_continues(fake_llm_client):
     """If only the second batch fails, partial results from the first batch are returned."""
-    good_json = '{"Role": ["Engineer"]}'
-    mock_content = MagicMock()
-    mock_content.text = good_json
-
-    mock_message = MagicMock()
-    mock_message.content = [mock_content]
-
-    call_count = 0
-
-    async def side_effect(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return mock_message
-        raise RuntimeError("second batch failed")
-
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(side_effect=side_effect)
+    fake_llm_client.responses = [
+        '{"Role": ["Engineer"]}',
+        LLMError("second batch failed", status_code=400),
+    ]
 
     contacts = [{"full_name": f"Contact {i}"} for i in range(60)]
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        with patch("app.services.auto_tagger._get_anthropic_client", return_value=mock_client):
-            result = await discover_taxonomy(contacts)
+    result = await discover_taxonomy(contacts)
 
-    # First batch succeeded, so we get partial results
     assert "Role" in result
     assert "Engineer" in result["Role"]
 
@@ -309,129 +280,98 @@ async def test_discover_taxonomy_second_batch_failure_continues():
 # assign_tags
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-async def test_assign_tags_no_api_key():
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = ""
-        result = await assign_tags({"full_name": "Alice"}, {"Role": ["CEO"]})
+async def test_assign_tags_client_construction_failure_returns_empty(
+    failing_get_llm_client,
+):
+    result = await assign_tags({"full_name": "Alice"}, {"Role": ["CEO"]})
+
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_assign_tags_returns_matching_tags():
+async def test_assign_tags_returns_matching_tags(fake_llm_client):
     taxonomy = {"Role": ["CEO", "Founder"]}
-    response_json = '{"tags": ["CEO", "Founder"], "new_tags": []}'
-    mock_client = _make_mock_client(response_json)
+    fake_llm_client.response = '{"tags": ["CEO", "Founder"], "new_tags": []}'
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        result = await assign_tags(
-            {"full_name": "Alice", "title": "CEO and Founder"},
-            taxonomy,
-            client=mock_client,
-        )
+    result = await assign_tags(
+        {"full_name": "Alice", "title": "CEO and Founder"},
+        taxonomy,
+    )
 
     assert "CEO" in result
     assert "Founder" in result
 
+    call = fake_llm_client.last_call
+    assert call is not None
+    assert call["model"] == settings.LLM_MODEL_FAST
+    assert call["max_tokens"] == 512
+
 
 @pytest.mark.asyncio
-async def test_assign_tags_filters_out_tags_not_in_taxonomy():
+async def test_assign_tags_filters_out_tags_not_in_taxonomy(fake_llm_client):
     taxonomy = {"Role": ["CEO"]}
-    # LLM returns a tag that's not in the taxonomy
-    response_json = '{"tags": ["CEO", "Alien Overlord"], "new_tags": []}'
-    mock_client = _make_mock_client(response_json)
+    fake_llm_client.response = '{"tags": ["CEO", "Alien Overlord"], "new_tags": []}'
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        result = await assign_tags(
-            {"full_name": "Alice"},
-            taxonomy,
-            client=mock_client,
-        )
+    result = await assign_tags({"full_name": "Alice"}, taxonomy)
 
     assert "CEO" in result
     assert "Alien Overlord" not in result
 
 
 @pytest.mark.asyncio
-async def test_assign_tags_case_insensitive_match_returns_canonical():
+async def test_assign_tags_case_insensitive_match_returns_canonical(fake_llm_client):
     """LLM returns 'ceo' (lowercase); taxonomy has 'CEO' — canonical form is returned."""
     taxonomy = {"Role": ["CEO", "Founder"]}
-    response_json = '{"tags": ["ceo"], "new_tags": []}'
-    mock_client = _make_mock_client(response_json)
+    fake_llm_client.response = '{"tags": ["ceo"], "new_tags": []}'
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        result = await assign_tags(
-            {"full_name": "Alice"},
-            taxonomy,
-            client=mock_client,
-        )
+    result = await assign_tags({"full_name": "Alice"}, taxonomy)
 
     assert "CEO" in result
     assert "ceo" not in result
 
 
 @pytest.mark.asyncio
-async def test_assign_tags_api_failure_returns_empty_list():
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(side_effect=RuntimeError("API error"))
+async def test_assign_tags_api_failure_returns_empty_list(fake_llm_client):
+    fake_llm_client.responses = [LLMError("API error", status_code=401)]
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        result = await assign_tags(
-            {"full_name": "Alice"},
-            {"Role": ["CEO"]},
-            client=mock_client,
-        )
+    result = await assign_tags({"full_name": "Alice"}, {"Role": ["CEO"]})
 
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_assign_tags_invalid_json_response_returns_empty_list():
-    mock_client = _make_mock_client("not json at all")
+async def test_assign_tags_invalid_json_response_returns_empty_list(fake_llm_client):
+    fake_llm_client.response = "not json at all"
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        result = await assign_tags(
-            {"full_name": "Alice"},
-            {"Role": ["CEO"]},
-            client=mock_client,
-        )
+    result = await assign_tags({"full_name": "Alice"}, {"Role": ["CEO"]})
 
     assert result == []
 
 
 @pytest.mark.asyncio
-async def test_assign_tags_uses_provided_client_not_new_one():
-    """When a client is passed in, _get_anthropic_client should not be called."""
+async def test_assign_tags_uses_provided_client_not_factory(fake_llm_client):
+    """When a client is passed in, get_llm_client must not be used."""
     taxonomy = {"Role": ["Engineer"]}
-    response_json = '{"tags": ["Engineer"], "new_tags": []}'
-    mock_client = _make_mock_client(response_json)
+    provided = FakeLLMClient(response='{"tags": ["Engineer"], "new_tags": []}')
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        with patch("app.services.auto_tagger._get_anthropic_client") as mock_factory:
-            result = await assign_tags(
-                {"full_name": "Bob", "title": "Software Engineer"},
-                taxonomy,
-                client=mock_client,
-            )
-            mock_factory.assert_not_called()
+    result = await assign_tags(
+        {"full_name": "Bob", "title": "Software Engineer"},
+        taxonomy,
+        client=provided,
+    )
 
     assert "Engineer" in result
+    assert len(provided.calls) == 1
+    assert fake_llm_client.calls == []
 
 
 @pytest.mark.asyncio
-async def test_assign_tags_empty_tags_in_response():
+async def test_assign_tags_empty_tags_in_response(fake_llm_client):
     taxonomy = {"Role": ["CEO"]}
-    response_json = '{"tags": [], "new_tags": []}'
-    mock_client = _make_mock_client(response_json)
+    fake_llm_client.response = '{"tags": [], "new_tags": []}'
 
-    with patch("app.services.auto_tagger.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = "test-key"
-        result = await assign_tags({"full_name": "Alice"}, taxonomy, client=mock_client)
+    result = await assign_tags({"full_name": "Alice"}, taxonomy)
 
     assert result == []

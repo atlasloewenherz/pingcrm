@@ -1,28 +1,21 @@
-"""AI-powered tag discovery and assignment using Anthropic Claude."""
+"""AI-powered tag discovery and assignment."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
 
 from app.core.config import settings
+from app.services import llm
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "claude-haiku-4-5-20251001"
 _BATCH_SIZE = 50
 
-# Reuse retry/semaphore patterns from event_classifier
-_llm_semaphore = asyncio.Semaphore(5)
-_RETRY_MAX_ATTEMPTS = 3
-_RETRY_BASE_DELAY = 1.0
-_RETRY_BACKOFF_FACTOR = 2.0
-
-
-def _get_anthropic_client():
-    from anthropic import AsyncAnthropic
-    return AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+# LLM call timeouts. Tagging and taxonomy passes historically used a longer
+# timeout than the other services because batches can be large.
+_TAXONOMY_TIMEOUT = 60.0
+_ASSIGN_TIMEOUT = 60.0
 
 
 def _parse_json_response(raw: str) -> Any:
@@ -39,35 +32,6 @@ def _parse_json_response(raw: str) -> Any:
     except json.JSONDecodeError:
         logger.warning("_parse_json_response: could not parse: %r", raw[:200])
         return None
-
-
-async def _call_with_retry(client, **kwargs) -> Any:
-    """Call Anthropic API with exponential backoff on transient errors."""
-    from anthropic import APIStatusError
-    import random
-
-    transient_codes = {429, 500, 529}
-    last_exc: Exception | None = None
-
-    for attempt in range(_RETRY_MAX_ATTEMPTS):
-        try:
-            return await asyncio.wait_for(
-                client.messages.create(**kwargs),
-                timeout=60,
-            )
-        except APIStatusError as exc:
-            if exc.status_code not in transient_codes:
-                raise
-            last_exc = exc
-        except asyncio.TimeoutError as exc:
-            last_exc = exc
-
-        if attempt < _RETRY_MAX_ATTEMPTS - 1:
-            delay = _RETRY_BASE_DELAY * (_RETRY_BACKOFF_FACTOR ** attempt)
-            jitter = random.uniform(-0.5, 0.5)
-            await asyncio.sleep(max(0.0, delay + jitter))
-
-    raise last_exc  # type: ignore[misc]
 
 
 def _sanitize(value: str, max_len: int = 200) -> str:
@@ -130,14 +94,14 @@ async def discover_taxonomy(
     Returns:
         Dict mapping category names to lists of tag strings.
     """
-    if not settings.ANTHROPIC_API_KEY:
-        logger.warning("discover_taxonomy: ANTHROPIC_API_KEY not configured.")
-        return {}
-
     if not contacts_summary:
         return {}
 
-    client = _get_anthropic_client()
+    try:
+        client = await llm.get_llm_client(settings.LLM_MODEL_FAST)
+    except Exception:
+        logger.exception("discover_taxonomy: could not construct LLM client.")
+        return {}
 
     # Batch contacts
     batches: list[list[dict]] = []
@@ -184,14 +148,13 @@ async def discover_taxonomy(
         )
 
         try:
-            async with _llm_semaphore:
-                message = await _call_with_retry(
-                    client,
-                    model=_MODEL,
-                    max_tokens=2048,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-            raw = message.content[0].text if message.content else ""
+            raw = await llm.complete_with_retry(
+                client,
+                model=settings.LLM_MODEL_FAST,
+                max_tokens=2048,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=_TAXONOMY_TIMEOUT,
+            )
             parsed = _parse_json_response(raw)
 
             if isinstance(parsed, dict):
@@ -222,10 +185,6 @@ async def deduplicate_taxonomy(
     - "VC/Investment" + "Venture Capital" → "Venture Capital"
     - Categories "Role/Expertise" + "Role" → "Role/Expertise"
     """
-    if not settings.ANTHROPIC_API_KEY:
-        logger.warning("deduplicate_taxonomy: ANTHROPIC_API_KEY not configured.")
-        return raw_taxonomy
-
     # Guard: skip if taxonomy is empty or small (≤10 tags total)
     total_tags = sum(len(tags) for tags in raw_taxonomy.values())
     if total_tags <= 10:
@@ -259,15 +218,14 @@ async def deduplicate_taxonomy(
     )
 
     try:
-        client = _get_anthropic_client()
-        async with _llm_semaphore:
-            message = await _call_with_retry(
-                client,
-                model=_MODEL,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        raw = message.content[0].text if message.content else ""
+        client = await llm.get_llm_client(settings.LLM_MODEL_FAST)
+        raw = await llm.complete_with_retry(
+            client,
+            model=settings.LLM_MODEL_FAST,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=_TAXONOMY_TIMEOUT,
+        )
         parsed = _parse_json_response(raw)
 
         if isinstance(parsed, dict) and all(
@@ -295,25 +253,19 @@ async def assign_tags(
     contact_data: dict,
     taxonomy: dict[str, list[str]],
     *,
-    client=None,
+    client: llm.LLMClient | None = None,
 ) -> list[str]:
     """Phase 2: Assign tags to a single contact from the approved taxonomy.
 
     Args:
         contact_data: Dict with contact fields.
         taxonomy: The approved taxonomy (category -> tags).
-        client: Optional pre-created AsyncAnthropic client (reuse to avoid connection leaks).
+        client: Optional pre-resolved LLMClient to reuse across contacts.
+            When omitted, the memoized adapter for ``LLM_MODEL_FAST`` is used.
 
     Returns:
         List of tag strings to assign.
     """
-    if not settings.ANTHROPIC_API_KEY:
-        logger.warning("assign_tags: ANTHROPIC_API_KEY not configured.")
-        return []
-
-    if client is None:
-        client = _get_anthropic_client()
-
     # Flatten taxonomy for prompt
     taxonomy_lines = []
     for category, tags in taxonomy.items():
@@ -338,14 +290,15 @@ async def assign_tags(
     )
 
     try:
-        async with _llm_semaphore:
-            message = await _call_with_retry(
-                client,
-                model=_MODEL,
-                max_tokens=512,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        raw = message.content[0].text if message.content else ""
+        if client is None:
+            client = await llm.get_llm_client(settings.LLM_MODEL_FAST)
+        raw = await llm.complete_with_retry(
+            client,
+            model=settings.LLM_MODEL_FAST,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=_ASSIGN_TIMEOUT,
+        )
         parsed = _parse_json_response(raw)
 
         if isinstance(parsed, dict):
