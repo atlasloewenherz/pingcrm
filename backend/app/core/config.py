@@ -60,6 +60,26 @@ class Settings(BaseSettings):
 
     ANTHROPIC_API_KEY: str = ""
 
+    # LLM provider abstraction. The provider is derived from the model string's
+    # prefix (anthropic/, openai/, ollama/, vllm/) rather than a separate
+    # LLM_PROVIDER flag that could drift out of sync with it.
+    LLM_BASE_URL: str = ""
+    LLM_API_KEY: str = ""
+    LLM_MODEL_DRAFT: str = "anthropic/claude-sonnet-4-6"
+    LLM_MODEL_FAST: str = "anthropic/claude-haiku-4-5-20251001"
+    # "none" | "json_object" | "json_schema". Anthropic ignores this — its
+    # /v1/messages endpoint has no response_format parameter.
+    LLM_STRUCTURED_OUTPUT: str = "none"
+    LLM_TIMEOUT: float = 30.0
+    LLM_MAX_RETRIES: int = 3
+    # Only for self-hosted, no-auth OpenAI-compatible servers (local Ollama,
+    # vLLM on the LAN). Not a general escape hatch for remote endpoints.
+    LLM_ALLOW_EMPTY_KEY: bool = False
+    # Owned per adapter instance, shared by every service using the same
+    # provider config. Set to 10 to match the previous combined peak across
+    # event_classifier + auto_tagger.
+    LLM_MAX_CONCURRENCY: int = 5
+
     TELEGRAM_API_ID: int = 0
     TELEGRAM_API_HASH: str = ""
 
