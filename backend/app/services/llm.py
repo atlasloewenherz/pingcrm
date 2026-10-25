@@ -252,6 +252,70 @@ class OpenAICompatibleAdapter:
         return response.choices[0].message.content or ""
 
 
+SUPPORTED_PREFIXES = {"anthropic", "openai", "ollama", "vllm"}
+
+# One adapter per provider config, holding that config's SDK client, semaphore,
+# and structured-output rejection cache. Guarded because get_llm_client is
+# async and may be called concurrently on first use.
+_clients: dict[tuple[str, str, str], LLMClient] = {}
+_clients_lock = asyncio.Lock()
+
+
+def _adapter_kind(prefix: str) -> str:
+    return "anthropic" if prefix == "anthropic" else "openai_compatible"
+
+
+def _model_prefix(model: str) -> str:
+    return model.split("/", 1)[0] if "/" in model else ""
+
+
+async def get_llm_client(model: str) -> LLMClient:
+    """Return the (memoized) adapter for ``model``'s provider config.
+
+    The provider is derived from the model prefix alone. An unrecognized
+    prefix is an error, not an implicit Anthropic fallback: silently routing a
+    typo'd local model to a paid remote API is the failure mode this avoids.
+    """
+    prefix = _model_prefix(model)
+    if prefix not in SUPPORTED_PREFIXES:
+        raise ValueError(
+            f"model={model!r} must begin with one of "
+            f"{sorted(SUPPORTED_PREFIXES)}. See docs/docs/setup.md."
+        )
+
+    kind = _adapter_kind(prefix)
+    base_url = settings.LLM_BASE_URL
+    api_key = (
+        _resolve_anthropic_api_key() if kind == "anthropic" else settings.LLM_API_KEY
+    )
+    cache_key = (kind, base_url, api_key)
+
+    async with _clients_lock:
+        client = _clients.get(cache_key)
+        if client is None:
+            if kind == "anthropic":
+                client = AnthropicAdapter(base_url=base_url, api_key=api_key)
+            else:
+                client = OpenAICompatibleAdapter(base_url=base_url, api_key=api_key)
+            _clients[cache_key] = client
+        return client
+
+
+def validate_llm_config() -> None:
+    """Fail fast when a configured model ID has no supported provider prefix.
+
+    Called from the FastAPI lifespan and from Celery's ``worker_process_init``
+    so a misconfigured deployment cannot boot in either runtime.
+    """
+    for name in ("LLM_MODEL_DRAFT", "LLM_MODEL_FAST"):
+        model = getattr(settings, name)
+        if _model_prefix(model) not in SUPPORTED_PREFIXES:
+            raise RuntimeError(
+                f"{name}={model!r} must begin with one of "
+                f"{sorted(SUPPORTED_PREFIXES)}. See docs/docs/setup.md."
+            )
+
+
 async def complete_with_retry(client: LLMClient, **kwargs: Any) -> str:
     """Call ``client.complete`` with exponential backoff on transient errors.
 

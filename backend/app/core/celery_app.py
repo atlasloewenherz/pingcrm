@@ -1,8 +1,10 @@
 """Celery application factory for PingCRM."""
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init
 
 from app.core.config import settings
+from app.services.llm import validate_llm_config
 
 celery_app = Celery(
     "pingcrm",
@@ -94,3 +96,14 @@ celery_app.conf.update(
         },
     },
 )
+
+
+@worker_process_init.connect
+def _validate_llm_config_on_worker_start(**kwargs) -> None:
+    """Validate LLM config in every forked worker child.
+
+    ``worker_ready`` fires after the worker accepts tasks, which is too late;
+    ``worker_process_init`` runs before the child consumes from the broker, so
+    a misconfigured model prefix prevents the worker from taking work at all.
+    """
+    validate_llm_config()
