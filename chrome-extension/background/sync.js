@@ -87,7 +87,7 @@ async function _runSyncInner(apiUrl, token, force, result) {
   console.log("[Sync] Cookies OK, reading watermark...");
 
   // ── Determine sync mode (first sync vs delta) ──
-  const { watermark } = await chrome.storage.local.get(["watermark"]);
+  const { watermark, firstSyncCursor } = await chrome.storage.local.get(["watermark", "firstSyncCursor"]);
   const isFirstSync = !watermark;
   console.log("[Sync] Mode:", isFirstSync ? "FIRST SYNC" : "delta", "watermark:", watermark);
   const cutoffMs = isFirstSync
@@ -106,6 +106,18 @@ async function _runSyncInner(apiUrl, token, force, result) {
     return await _handleSyncError(e, result);
   }
 
+  // First sync runs page-by-page with a push + checkpoint after each page
+  // (see _runFirstSyncIncremental) — an account with hundreds of conversations
+  // takes far longer than Chrome allows an MV3 service worker to run in one
+  // go, so progress has to survive being killed mid-sync. Delta syncs only
+  // ever cover activity since the last watermark, which is small enough to
+  // push in one shot, so that path is unchanged below.
+  if (isFirstSync) {
+    return await _runFirstSyncIncremental(
+      apiUrl, token, liAt, jsessionid, selfUrn, cutoffMs, firstSyncCursor ?? null, result
+    );
+  }
+
   // ── Fetch conversations (paginated) ──
   const conversations = await _fetchAllConversations(liAt, jsessionid, selfUrn, isFirstSync, cutoffMs, result);
   if (result.error) return result;
@@ -122,8 +134,141 @@ async function _runSyncInner(apiUrl, token, force, result) {
   result.messages = allMessages.length;
 
   // ── Push to backend (always push, even with 0 messages, to get backfill_needed) ──
+  const pushOutcome = await _pushMessagesBatch(apiUrl, token, allMessages, result);
+  if (!pushOutcome.ok) return result;
+
+  // ── Persist watermark and sync timestamp ──
+  const updates = { lastVoyagerSync: new Date().toISOString(), nextRetryAt: null };
+  if (newestTimestamp > 0) {
+    updates.watermark = new Date(newestTimestamp).toISOString();
+  }
+  await chrome.storage.local.set(updates);
+
+  return result;
+}
+
+// ── First sync: page-by-page with incremental checkpointing ─────────────────
+
+/**
+ * Run the first sync one conversation-list page at a time, pushing each
+ * page's messages and checkpointing a resume cursor (`firstSyncCursor`)
+ * immediately after each successful push.
+ *
+ * Why: a first sync on an account with hundreds of conversations takes far
+ * longer than an MV3 service worker is allowed to run continuously — Chrome
+ * kills it mid-sync, and since the old code only pushed and saved progress
+ * once at the very end, every retry restarted from zero and hit the same
+ * wall again, forever. Checkpointing after each page means a kill loses at
+ * most one page of progress; the next sync attempt (triggered by the next
+ * page-visit auto-sync or a manual "Sync Now") resumes pagination from
+ * `firstSyncCursor` instead of from the beginning.
+ *
+ * `watermark` (the real delta-sync cursor) is deliberately left unset until
+ * pagination genuinely finishes — setting it early would flip `isFirstSync`
+ * to false on the next attempt, and the delta-sync path skips conversations
+ * with no activity since the watermark, silently abandoning every older
+ * conversation this run hadn't reached yet. `firstSyncCursor` is a separate
+ * key for exactly this reason.
+ *
+ * @returns {Promise<typeof result>}
+ */
+async function _runFirstSyncIncremental(apiUrl, token, liAt, jsessionid, selfUrn, cutoffMs, resumeCursor, result) {
+  let pageCursor = resumeCursor;
+  let totalConversations = 0;
+  let totalMessages = 0;
+  let newestTimestampOverall = 0;
+  let morePages = true;
+
+  if (resumeCursor) {
+    console.log("[Sync] Resuming first sync from checkpoint:", new Date(resumeCursor).toISOString());
+  }
+
+  while (morePages && totalConversations < CONVERSATION_PAGE_MAX) {
+    let pageRaw;
+    try {
+      pageRaw = await voyagerGetConversations(liAt, jsessionid, selfUrn, pageCursor);
+      await _delay(RATE_LIMIT_DELAY_MS);
+    } catch (e) {
+      await _handleSyncError(e, result);
+      return result;
+    }
+
+    const page = _parseConversations(pageRaw);
+    if (page.length === 0) break;
+
+    // watermark=null: a first-sync page never has a prior watermark of its
+    // own to filter against — cutoffMs (the 30-day backfill window) is what
+    // decides full-fetch vs preview-only per conversation, same as before.
+    const { allMessages, newestTimestamp } = await _processConversations(
+      page, liAt, jsessionid, selfUrn, /* isFirstSync */ true, cutoffMs, /* watermark */ null, result
+    );
+    if (result.error) return result;
+    if (newestTimestamp > newestTimestampOverall) newestTimestampOverall = newestTimestamp;
+
+    const pushOutcome = await _pushMessagesBatch(apiUrl, token, allMessages, result);
+    if (!pushOutcome.ok) return result;
+    token = pushOutcome.token;
+
+    totalConversations += page.length;
+    totalMessages += allMessages.length;
+
+    // Same cursor rule as the original pagination loop: the oldest item on
+    // the page becomes the next page's cursor.
+    pageCursor = page[page.length - 1]?.lastActivityAt ?? null;
+
+    // Checkpoint only after the push above has succeeded — this is the line
+    // that makes a mid-sync kill resumable instead of a silent restart.
+    await chrome.storage.local.set({ firstSyncCursor: pageCursor });
+
+    morePages = pageCursor !== null;
+  }
+
+  result.conversations = totalConversations;
+  result.messages = totalMessages;
+  console.log("[Sync] First sync complete:", totalConversations, "conversations,", totalMessages, "messages");
+
+  // Pagination genuinely finished — promote to delta-sync mode for every
+  // future run and drop the now-irrelevant first-sync checkpoint.
+  const updates = { lastVoyagerSync: new Date().toISOString(), nextRetryAt: null };
+  if (newestTimestampOverall > 0) {
+    updates.watermark = new Date(newestTimestampOverall).toISOString();
+  }
+  await chrome.storage.local.set(updates);
+  await chrome.storage.local.remove(["firstSyncCursor"]);
+
+  return result;
+}
+
+// ── Backend push + silent token refresh ─────────────────────────────────────
+
+async function _pushWithToken(apiUrl, token, body) {
+  return apiFetch(`${apiUrl}/api/v1/linkedin/push`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`,
+    },
+    body,
+  });
+}
+
+/**
+ * Push one batch of messages to the backend, handling the silent-refresh-on-
+ * 401 dance and backfill-needed bookkeeping. Mutates `result.error` on
+ * failure. Called once per page during first sync and once overall during
+ * delta sync — always push, even with 0 messages, so `backfill_needed` keeps
+ * flowing on every call.
+ *
+ * Accumulates `_pendingBackfill` across calls (read-merge-write) rather than
+ * overwriting it, since first sync now pushes multiple times per run — a
+ * later page's response would otherwise silently drop an earlier page's
+ * backfill ids.
+ *
+ * @returns {Promise<{ok: boolean, token: string}>} the possibly-refreshed token
+ */
+async function _pushMessagesBatch(apiUrl, token, messages, result) {
   try {
-    const body = JSON.stringify({ profiles: [], messages: allMessages });
+    const body = JSON.stringify({ profiles: [], messages });
     let pushResp = await _pushWithToken(apiUrl, token, body);
 
     // On 401, try a silent refresh once. A fresh token means this was a
@@ -144,12 +289,12 @@ async function _runSyncInner(apiUrl, token, force, result) {
         // popup flips to the unpaired view and the user can re-pair.
         await chrome.storage.local.remove(["token"]);
         result.error = "AUTH_EXPIRED";
-        return result;
+        return { ok: false, token };
       }
       result.error = `PUSH_FAILED:${pushResp.status}`;
-      return result;
+      return { ok: false, token };
     }
-    console.log("[Sync] Push succeeded:", result.messages, "messages");
+    console.log("[Sync] Push succeeded:", messages.length, "messages");
 
     const pushJson = await pushResp.json();
     const pushData = pushJson?.data ?? {};
@@ -159,34 +304,15 @@ async function _runSyncInner(apiUrl, token, force, result) {
     const backfillIds = pushData?.backfill_needed ?? [];
     console.log("[Sync] Backfill needed:", backfillIds.length, backfillIds.length > 0 ? JSON.stringify(backfillIds[0]) : "none");
     if (backfillIds.length > 0) {
-      await chrome.storage.local.set({ _pendingBackfill: backfillIds });
+      const { _pendingBackfill: existing = [] } = await chrome.storage.local.get(["_pendingBackfill"]);
+      await chrome.storage.local.set({ _pendingBackfill: [...existing, ...backfillIds] });
     }
+
+    return { ok: true, token };
   } catch (e) {
     result.error = e.message;
-    return result;
+    return { ok: false, token };
   }
-
-  // ── Persist watermark and sync timestamp ──
-  const updates = { lastVoyagerSync: new Date().toISOString(), nextRetryAt: null };
-  if (newestTimestamp > 0) {
-    updates.watermark = new Date(newestTimestamp).toISOString();
-  }
-  await chrome.storage.local.set(updates);
-
-  return result;
-}
-
-// ── Backend push + silent token refresh ─────────────────────────────────────
-
-async function _pushWithToken(apiUrl, token, body) {
-  return apiFetch(`${apiUrl}/api/v1/linkedin/push`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
-    },
-    body,
-  });
 }
 
 /**
