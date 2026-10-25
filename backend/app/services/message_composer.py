@@ -1,10 +1,8 @@
-"""AI Message Composer using Anthropic Claude API."""
+"""AI Message Composer using the configured LLM provider."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import random
 import re
 import uuid
 from datetime import UTC, datetime
@@ -16,51 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.contact import Contact
 from app.models.interaction import Interaction
+from app.services import llm
 
 logger = logging.getLogger(__name__)
 
-# Retry configuration for transient Anthropic API errors.
-_RETRY_TRANSIENT_STATUS_CODES = {429, 500, 529}
-_RETRY_MAX_ATTEMPTS = 3
-_RETRY_BASE_DELAY = 1.0  # seconds
-_RETRY_BACKOFF_FACTOR = 2.0
-_RETRY_JITTER = 0.5  # ± seconds
-
-
-async def _call_anthropic_with_retry(client: Any, **kwargs) -> Any:
-    """Call client.messages.create with exponential backoff on transient errors.
-
-    Retries on APIStatusError with status codes in _RETRY_TRANSIENT_STATUS_CODES.
-    Raises the last exception if all attempts are exhausted.
-    """
-    from anthropic import APIStatusError  # noqa: PLC0415
-
-    last_exc: Exception | None = None
-    for attempt in range(_RETRY_MAX_ATTEMPTS):
-        try:
-            return await asyncio.wait_for(
-                client.messages.create(**kwargs),
-                timeout=30,
-            )
-        except APIStatusError as exc:
-            if exc.status_code not in _RETRY_TRANSIENT_STATUS_CODES:
-                raise
-            last_exc = exc
-        except asyncio.TimeoutError as exc:
-            last_exc = exc
-
-        if attempt < _RETRY_MAX_ATTEMPTS - 1:
-            delay = _RETRY_BASE_DELAY * (_RETRY_BACKOFF_FACTOR ** attempt)
-            jitter = random.uniform(-_RETRY_JITTER, _RETRY_JITTER)
-            sleep_time = max(0.0, delay + jitter)
-            logger.warning(
-                "_call_anthropic_with_retry: transient error on attempt %d/%d, "
-                "retrying in %.2fs: %s",
-                attempt + 1, _RETRY_MAX_ATTEMPTS, sleep_time, last_exc,
-            )
-            await asyncio.sleep(sleep_time)
-
-    raise last_exc  # type: ignore[misc]
+_COMPOSE_TIMEOUT = 30.0
 
 
 _TWEET_CACHE_TTL = 12 * 60 * 60  # 12 hours
@@ -241,7 +199,7 @@ async def compose_followup_message(
     revival_context: bool = False,
     user: Any = None,
 ) -> str:
-    """Compose a personalised follow-up message using Anthropic Claude.
+    """Compose a personalised follow-up message using the configured LLM provider.
 
     Args:
         contact_id: UUID of the contact to message.
@@ -253,8 +211,6 @@ async def compose_followup_message(
     Returns:
         A short, natural draft message (2-3 sentences).
     """
-    import anthropic
-
     # ------------------------------------------------------------------
     # Fetch contact profile
     # ------------------------------------------------------------------
@@ -387,20 +343,17 @@ INSTRUCTIONS:
 
 Message:"""
 
-    if not settings.ANTHROPIC_API_KEY:
-        return f"Hey {first_name}, just wanted to check in. How have things been going?"
-
-    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-
     try:
-        message = await _call_anthropic_with_retry(
+        client = await llm.get_llm_client(settings.LLM_MODEL_DRAFT)
+        draft = await llm.complete_with_retry(
             client,
-            model="claude-sonnet-4-6",
+            model=settings.LLM_MODEL_DRAFT,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
+            timeout=_COMPOSE_TIMEOUT,
         )
-        draft = message.content[0].text.strip()
-    except (asyncio.TimeoutError, Exception):
+        draft = draft.strip()
+    except Exception:
         logger.exception(
             "compose_followup_message: API call failed for contact %s",
             contact_id,

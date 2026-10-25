@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.models.contact import Contact
 from app.models.interaction import Interaction
 from app.services.meeting_prep_email import compose_prep_email
-from app.services.message_composer import _call_anthropic_with_retry
+from app.services import llm
 
 logger = logging.getLogger(__name__)
 
@@ -236,16 +236,17 @@ INSTRUCTIONS:
 
 Talking points:"""
 
-    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-
     try:
-        message = await _call_anthropic_with_retry(
-            client,
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text.strip()
+        client = await llm.get_llm_client(settings.LLM_MODEL_FAST)
+        return (
+            await llm.complete_with_retry(
+                client,
+                model=settings.LLM_MODEL_FAST,
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=30.0,
+            )
+        ).strip()
     except Exception:
         logger.exception(
             "generate_talking_points: API call failed",
