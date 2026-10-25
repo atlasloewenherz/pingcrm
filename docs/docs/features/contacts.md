@@ -157,7 +157,7 @@ The magic wand button (wand icon in the Contact Details panel header) uses AI to
 
 1. Click the wand icon in the Contact Details sidebar.
 2. The system collects the contact's Twitter bio, Telegram bio, LinkedIn bio/headline, and current name fields.
-3. These are sent to Claude Haiku, which returns structured JSON with extracted fields.
+3. These are sent to the configured fast model (Claude Haiku by default), which returns structured JSON with extracted fields.
 4. The extracted data is applied to the contact and their linked organization.
 
 **What it extracts:**
