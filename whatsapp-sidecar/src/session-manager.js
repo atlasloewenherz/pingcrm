@@ -142,7 +142,22 @@ class SessionManager {
       });
     });
 
-    await client.initialize();
+    try {
+      await client.initialize();
+    } catch (err) {
+      // Puppeteer/Chromium can fail to launch under host memory pressure
+      // (OOM kill) without ever firing a client event. Left uncaught, the
+      // session sits in the map forever as "initializing" with qr: null --
+      // the frontend polls /qr indefinitely and never sees a code, with no
+      // trace of why in the logs. Surface the failure and clear the session
+      // so the *next* connect attempt starts clean instead of silently
+      // hanging until someone notices and retries.
+      log("error", "session initialize failed", { userId, error: err.message });
+      this._sessions.delete(userId);
+      try {
+        await client.destroy();
+      } catch { /* already dead */ }
+    }
   }
 
   /**
