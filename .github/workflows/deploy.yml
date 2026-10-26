@@ -151,9 +151,41 @@ jobs:
         with:
           context: ./whatsapp-sidecar
           push: true
+          load: true
           tags: ${{ env.WHATSAPP_SIDECAR_IMAGE }}:latest,${{ env.WHATSAPP_SIDECAR_IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test whatsapp-sidecar Chrome launch
+        # Verifies Puppeteer's bundled Chrome for Testing actually launches
+        # and can evaluate JS against a real page, on real x86_64 hardware --
+        # this exact launch previously fatal-crashed under emulation
+        # ("GPU process isn't usable") in ways that may or may not reproduce
+        # on real hardware, and gating the deploy job on this is cheaper than
+        # finding out by breaking WhatsApp connect in prod.
+        run: |
+          docker run --rm --shm-size=1gb "${{ env.WHATSAPP_SIDECAR_IMAGE }}:${{ github.sha }}" node -e "
+          const puppeteer = require('puppeteer');
+          (async () => {
+            const browser = await puppeteer.launch({
+              headless: true,
+              args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--use-gl=swiftshader',
+                '--disable-software-rasterizer',
+              ],
+            });
+            const page = await browser.newPage();
+            await page.goto('https://web.whatsapp.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            const title = await page.evaluate(() => document.title);
+            console.log('PAGE TITLE:', title);
+            await browser.close();
+            console.log('SMOKE TEST OK');
+          })().catch((e) => { console.error('SMOKE TEST FAILED:', e.message); process.exit(1); });
+          "
 
   deploy:
     needs: build
