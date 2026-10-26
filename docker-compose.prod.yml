@@ -55,7 +55,7 @@ services:
       retries: 5
 
   backend:
-    image: ghcr.io/sneg55/pingcrm/backend:latest
+    image: harbor.ordnung.io/all/pingcrm-backend:latest
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://pingcrm:${POSTGRES_PASSWORD}@postgres:5432/pingcrm
@@ -96,7 +96,7 @@ services:
       start_period: 15s
 
   worker:
-    image: ghcr.io/sneg55/pingcrm/backend:latest
+    image: harbor.ordnung.io/all/pingcrm-backend:latest
     restart: unless-stopped
     command: celery -A worker.celery_app worker --beat --loglevel=info
     environment:
@@ -126,14 +126,14 @@ services:
         condition: service_healthy
 
   frontend:
-    image: ghcr.io/sneg55/pingcrm/frontend:latest
+    image: harbor.ordnung.io/all/pingcrm-frontend:latest
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
 
   whatsapp-sidecar:
-    image: ghcr.io/sneg55/pingcrm/whatsapp-sidecar:latest
+    image: harbor.ordnung.io/all/pingcrm-whatsapp-sidecar:latest
     restart: unless-stopped
     shm_size: '2gb'
     volumes:
