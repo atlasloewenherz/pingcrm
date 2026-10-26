@@ -68,8 +68,20 @@ class SessionManager {
   async startSession(userId) {
     const existing = this._sessions.get(userId);
     if (existing) {
-      // If session is active (connected, authenticating, or awaiting QR scan), keep it
-      if (existing.status === "connected" || existing.status === "authenticated" || existing.status === "qr_pending") {
+      // If session is active -- including still "initializing" -- keep it.
+      // autoRestore() launches a session per persisted profile dir at container
+      // boot; if a user's own /start request lands in that same window, two
+      // Chromium launches raced the same LocalAuth profile directory's
+      // SingletonLock, and the loser died with a "Target closed" protocol
+      // error. Treating "initializing" as stale and tearing down whatever's
+      // already launching -- instead of letting that launch finish -- was
+      // what created the race in the first place.
+      if (
+        existing.status === "connected" ||
+        existing.status === "authenticated" ||
+        existing.status === "qr_pending" ||
+        existing.status === "initializing"
+      ) {
         log("info", "session already active", { userId, status: existing.status });
         return;
       }
