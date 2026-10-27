@@ -115,6 +115,12 @@ class SessionManager {
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--disable-gpu",
+          // Chrome 130+ fatals on launch ("GPU process isn't usable. Goodbye.")
+          // in a container with no real GPU unless a software rendering
+          // backend is named explicitly -- --disable-gpu alone used to be
+          // enough but no longer is.
+          "--use-gl=swiftshader",
+          "--disable-software-rasterizer",
         ],
         headless: true,
       },
