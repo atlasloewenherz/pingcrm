@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Build and Push Images
 
 on:
   push:
@@ -186,51 +186,3 @@ jobs:
             console.log('SMOKE TEST OK');
           })().catch((e) => { console.error('SMOKE TEST FAILED:', e.message); process.exit(1); });
           "
-
-  deploy:
-    needs: build
-    if: github.ref == 'refs/heads/ordnung'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Sync docker-compose.prod.yml to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          # NOTE: a 'deploy' user with Docker access must be set up on the server
-          username: deploy
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "docker-compose.prod.yml"
-          target: "/opt/pingcrm/"
-          overwrite: true
-
-      - name: Deploy to server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          # NOTE: a 'deploy' user with Docker access must be set up on the server
-          username: deploy
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: HARBOR_USERNAME,HARBOR_PASSWORD
-          script: |
-            cd /opt/pingcrm
-
-            # Login to Harbor
-            echo "$HARBOR_PASSWORD" | docker login harbor.ordnung.io -u "$HARBOR_USERNAME" --password-stdin
-
-            # Pull latest images
-            docker compose -f docker-compose.prod.yml pull
-
-            # Restart services
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-
-            # Cleanup old images
-            docker image prune -f
-        env:
-          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
