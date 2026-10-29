@@ -2,7 +2,7 @@
 
 These tests exercise the lifted ``_apply_tags_to_contacts`` coroutine against
 a real Postgres test database (via the conftest ``db`` fixture). External
-integration boundaries (``assign_tags``, ``_get_anthropic_client``,
+integration boundaries (``assign_tags``,
 ``app_settings.ANTHROPIC_API_KEY``) are mocked at the
 ``task_jobs.tagging`` module level so we cover the orchestration logic —
 taxonomy lookup, eligibility filtering, chunk/batch processing, error paths,
@@ -139,10 +139,6 @@ async def test_tags_single_contact_end_to_end(
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
         patch(
-            "app.services.task_jobs.tagging._get_anthropic_client",
-            return_value=object(),
-        ) as mock_client,
-        patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(return_value=["UX Designer", "Crypto"]),
         ) as mock_assign,
@@ -151,7 +147,6 @@ async def test_tags_single_contact_end_to_end(
         result = await _apply_tags_to_contacts(db, test_user.id)
 
     assert result == {"status": "ok", "tagged_count": 1}
-    mock_client.assert_called_once()
     assert mock_assign.await_count == 1
 
     await db.refresh(contact)
@@ -179,7 +174,6 @@ async def test_skips_already_tagged_contacts(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(return_value=["Crypto"]),
@@ -215,7 +209,6 @@ async def test_no_eligible_contacts_with_all_already_tagged(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch("app.services.task_jobs.tagging.assign_tags", new=AsyncMock(return_value=[])),
     ):
         mock_settings.ANTHROPIC_API_KEY = "sk-test"
@@ -236,7 +229,6 @@ async def test_no_eligible_contacts_with_zero_contacts(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch("app.services.task_jobs.tagging.assign_tags", new=AsyncMock(return_value=[])),
     ):
         mock_settings.ANTHROPIC_API_KEY = "sk-test"
@@ -259,7 +251,6 @@ async def test_archived_contacts_excluded_when_no_explicit_ids(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(return_value=["Crypto"]),
@@ -286,7 +277,6 @@ async def test_second_tier_contacts_excluded_when_no_explicit_ids(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(return_value=["Crypto"]),
@@ -314,7 +304,6 @@ async def test_explicit_contact_ids_includes_archived(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(return_value=["Crypto"]),
@@ -342,7 +331,6 @@ async def test_other_users_contacts_not_tagged(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(return_value=["Crypto"]),
@@ -383,13 +371,12 @@ async def test_interaction_topics_passed_to_assign_tags(
 
     captured_topics: list[list[str]] = []
 
-    async def fake_assign(contact_data, taxonomy_cats, *, client):  # noqa: ARG001
+    async def fake_assign(contact_data, taxonomy_cats, *, client=None):  # noqa: ARG001
         captured_topics.append(list(contact_data["interaction_topics"]))
         return ["Crypto"]
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(side_effect=fake_assign),
@@ -427,7 +414,6 @@ async def test_per_contact_assign_failure_recorded_in_errors(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(side_effect=fake_assign),
@@ -458,7 +444,6 @@ async def test_zero_tagged_uses_finished_with_issues_title(
 
     with (
         patch("app.services.task_jobs.tagging.app_settings") as mock_settings,
-        patch("app.services.task_jobs.tagging._get_anthropic_client", return_value=object()),
         patch(
             "app.services.task_jobs.tagging.assign_tags",
             new=AsyncMock(return_value=[]),

@@ -1,0 +1,41 @@
+{
+  "task": "bio_extractor",
+  "model_role": "LLM_MODEL_FAST",
+  "description": "Extract structured contact and company fields from raw profile text.",
+  "input": {
+    "full_name": "Ada Lovelace",
+    "twitter_bio": "Mathematician and writer building the Analytical Engine",
+    "linkedin_headline": "Founder at Analytical Engines, London",
+    "linkedin_bio": "I work on computing machinery and mathematical algorithms. Based in London, UK."
+  },
+  "fake_response": "{\"given_name\": \"Ada\", \"family_name\": \"Lovelace\", \"title\": \"Mathematician and writer\", \"company\": \"Analytical Engines\", \"company_website\": \"https://analyticalengines.example\", \"company_industry\": \"Computing\", \"company_location\": \"London, UK\"}",
+  "expected": {
+    "type": "object",
+    "required_keys": [
+      "given_name",
+      "company"
+    ],
+    "allowed_keys": [
+      "given_name",
+      "family_name",
+      "title",
+      "company",
+      "company_website",
+      "company_industry",
+      "company_location"
+    ],
+    "keyword_groups": [
+      [
+        "ada"
+      ],
+      [
+        "analytical",
+        "computing",
+        "engine"
+      ],
+      [
+        "london"
+      ]
+    ]
+  }
+}

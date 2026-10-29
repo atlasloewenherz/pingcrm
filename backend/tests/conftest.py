@@ -298,6 +298,26 @@ def user_factory(db_session: AsyncSession):
     return _factory
 
 
+@pytest.fixture
+def fake_llm_client(monkeypatch):
+    """Replace the async LLM client factory with a single ``FakeLLMClient``.
+
+    ``get_llm_client`` is async by contract, so the patch must be async too — a
+    synchronous lambda would hand the call site a coroutine with no
+    ``.complete`` instead of the fake.
+    """
+    from app.services.llm import LLMClient
+    from tests.fakes import FakeLLMClient
+
+    fake = FakeLLMClient()
+
+    async def _get(_model: str) -> LLMClient:
+        return fake
+
+    monkeypatch.setattr("app.services.llm.get_llm_client", _get, raising=False)
+    return fake
+
+
 @pytest_asyncio.fixture(loop_scope="function")
 async def test_notification(db: AsyncSession, test_user: User) -> Notification:
     """Create and return a test notification."""

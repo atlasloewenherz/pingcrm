@@ -7,15 +7,14 @@ import uuid
 from collections import defaultdict
 from datetime import datetime
 
-import anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.contact import Contact
 from app.models.interaction import Interaction
+from app.services import llm
 from app.services.meeting_prep_email import compose_prep_email
-from app.services.message_composer import _call_anthropic_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -183,13 +182,10 @@ async def build_prep_brief(
 
 
 async def generate_talking_points(briefs: list[dict], meeting_title: str) -> str:
-    """Use Claude Haiku to generate concise talking points for a meeting.
+    """Use the configured fast model to generate concise talking points.
 
-    Returns the AI-generated text, or an empty string on failure / missing key.
+    Returns the AI-generated text, or an empty string on failure.
     """
-    if not settings.ANTHROPIC_API_KEY:
-        return ""
-
     # Build prompt from attendee briefs
     attendee_sections: list[str] = []
     for b in briefs:
@@ -236,20 +232,21 @@ INSTRUCTIONS:
 
 Talking points:"""
 
-    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-
     try:
-        message = await _call_anthropic_with_retry(
-            client,
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text.strip()
+        client = await llm.get_llm_client(settings.LLM_MODEL_FAST)
+        return (
+            await llm.complete_with_retry(
+                client,
+                model=settings.LLM_MODEL_FAST,
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=settings.LLM_TIMEOUT_MEETING_PREP,
+            )
+        ).strip()
     except Exception:
         logger.exception(
-            "generate_talking_points: API call failed",
-            extra={"provider": "anthropic", "meeting_title": meeting_title},
+            "generate_talking_points: LLM API call failed",
+            extra={"model": settings.LLM_MODEL_FAST, "meeting_title": meeting_title},
         )
         return ""
 

@@ -64,7 +64,7 @@ When a Google Calendar meeting is 30 minutes away, PingCRM sends a prep brief em
 - **Attendee profiles** -- name, title, company, and relationship score (Strong/Warm/Cold).
 - **Platform bios** -- Twitter, LinkedIn, and Telegram bios when available.
 - **Recent interactions** -- the last 3-5 conversations across all platforms.
-- **AI talking points** -- Claude Haiku generates 3-5 specific, actionable talking points based on the attendee context.
+- **AI talking points** -- the configured fast model (Claude Haiku by default) generates 3-5 specific, actionable talking points based on the attendee context.
 
 The email is sent from your own Gmail account via the Gmail API (`gmail.send` scope). Existing users may be prompted to re-authorize Gmail to grant the new send permission.
 

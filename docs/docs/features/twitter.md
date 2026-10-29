@@ -51,7 +51,7 @@ Bio changes are a valuable signal for identifying career moves, fundraising acti
 
 ## Event Classification (On-Demand)
 
-When composing follow-up suggestions, PingCRM fetches recent tweets for the specific contact and uses Claude to classify events into:
+When composing follow-up suggestions, PingCRM fetches recent tweets for the specific contact and uses your configured LLM provider (Anthropic by default) to classify events into:
 
 | Category | Example |
 |---|---|

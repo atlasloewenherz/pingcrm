@@ -267,7 +267,7 @@ async def apply_tags(
     if len(contact_ids) <= 20:
         # Inline processing
         from app.models.interaction import Interaction
-        from app.services.auto_tagger import _get_anthropic_client, assign_tags, merge_tags
+        from app.services.auto_tagger import assign_tags, merge_tags
 
         # Batch-load contacts and interactions (avoids N+1)
         c_result = await db.execute(
@@ -294,8 +294,7 @@ async def apply_tags(
             if len(lst) < 10:
                 lst.append(row[1][:100])
 
-        # Reuse one client for all contacts
-        anthropic_client = _get_anthropic_client()
+        # Reuse the memoized adapter across contacts
         tagged = 0
         for cid in contact_ids:
             contact = contacts_map.get(cid)
@@ -313,7 +312,7 @@ async def apply_tags(
                 "location": contact.location,
                 "interaction_topics": topics_by_contact.get(cid, []),
             }
-            new_tags = await assign_tags(contact_data, taxonomy.categories, client=anthropic_client)
+            new_tags = await assign_tags(contact_data, taxonomy.categories)
             if new_tags:
                 contact.tags = merge_tags(contact.tags, new_tags)
                 tagged += 1

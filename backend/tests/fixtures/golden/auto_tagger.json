@@ -1,0 +1,49 @@
+{
+  "task": "auto_tagger",
+  "model_role": "LLM_MODEL_FAST",
+  "description": "Assign tags to a contact from an approved taxonomy.",
+  "input": {
+    "contact_data": {
+      "full_name": "Ada Lovelace",
+      "title": "Founder & CTO",
+      "company": "Analytical Engines",
+      "twitter_bio": "Building AI infrastructure and developer tools for computational research."
+    },
+    "taxonomy": {
+      "Role/Expertise": [
+        "Founder",
+        "CTO",
+        "Engineer",
+        "Researcher"
+      ],
+      "Industry": [
+        "AI",
+        "DevTools",
+        "Computing"
+      ],
+      "Stage": [
+        "Seed",
+        "Series A"
+      ]
+    }
+  },
+  "fake_response": "{\"tags\": [\"Founder\", \"CTO\", \"AI\"], \"new_tags\": []}",
+  "expected": {
+    "type": "list",
+    "min_items": 1,
+    "max_items": 8,
+    "keyword_groups": [
+      [
+        "founder",
+        "cto"
+      ],
+      [
+        "ai",
+        "devtools",
+        "computing",
+        "engineer",
+        "researcher"
+      ]
+    ]
+  }
+}

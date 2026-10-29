@@ -21,7 +21,7 @@ from app.models.contact import Contact
 from app.models.interaction import Interaction
 from app.models.notification import Notification
 from app.models.tag_taxonomy import TagTaxonomy
-from app.services.auto_tagger import _get_anthropic_client, assign_tags, merge_tags
+from app.services.auto_tagger import assign_tags, merge_tags
 from app.services.task_jobs.common import _run, logger, notify_tagging_failure
 
 
@@ -105,9 +105,8 @@ async def _apply_tags_to_contacts(
         await db.commit()
         return {"status": "ok", "tagged_count": 0}
 
-    # Create ONE shared Anthropic client to avoid connection pool leaks
-    anthropic_client = _get_anthropic_client()
-
+    # The memoized adapter is shared per provider config, so there is no
+    # per-run client to construct or dispose here.
     tagged = 0
     errors = 0
     BATCH_SIZE = 5  # concurrent API calls per batch
@@ -127,9 +126,7 @@ async def _apply_tags_to_contacts(
                 "location": contact.location,
                 "interaction_topics": topics,
             }
-            new_tags = await assign_tags(
-                contact_data, taxonomy.categories, client=anthropic_client,
-            )
+            new_tags = await assign_tags(contact_data, taxonomy.categories)
             return (contact, new_tags)
         except Exception:
             logger.warning(

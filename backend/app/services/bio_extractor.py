@@ -1,25 +1,14 @@
-"""AI-powered structured data extraction from contact bios using Claude Haiku."""
+"""AI-powered structured data extraction from contact bios."""
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import random
 from typing import Any
 
 from app.core.config import settings
+from app.services import llm
 
 logger = logging.getLogger(__name__)
-
-_MODEL = "claude-haiku-4-5-20251001"
-_RETRY_MAX_ATTEMPTS = 3
-_RETRY_BASE_DELAY = 1.0
-_RETRY_BACKOFF_FACTOR = 2.0
-
-
-def _get_anthropic_client():
-    from anthropic import AsyncAnthropic
-    return AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 
 def _parse_json_response(raw: str) -> Any:
@@ -38,34 +27,6 @@ def _parse_json_response(raw: str) -> Any:
         return None
 
 
-async def _call_with_retry(client, **kwargs) -> Any:
-    """Call Anthropic API with exponential backoff on transient errors."""
-    from anthropic import APIStatusError
-
-    transient_codes = {429, 500, 529}
-    last_exc: Exception | None = None
-
-    for attempt in range(_RETRY_MAX_ATTEMPTS):
-        try:
-            return await asyncio.wait_for(
-                client.messages.create(**kwargs),
-                timeout=30,
-            )
-        except APIStatusError as exc:
-            if exc.status_code not in transient_codes:
-                raise
-            last_exc = exc
-        except asyncio.TimeoutError as exc:
-            last_exc = exc
-
-        if attempt < _RETRY_MAX_ATTEMPTS - 1:
-            delay = _RETRY_BASE_DELAY * (_RETRY_BACKOFF_FACTOR ** attempt)
-            jitter = random.uniform(-0.5, 0.5)
-            await asyncio.sleep(max(0.0, delay + jitter))
-
-    raise last_exc  # type: ignore[misc]
-
-
 async def extract_from_bios(
     *,
     full_name: str | None = None,
@@ -78,7 +39,7 @@ async def extract_from_bios(
     linkedin_bio: str | None = None,
     linkedin_headline: str | None = None,
 ) -> dict[str, str]:
-    """Extract structured contact and company info from bios using Haiku.
+    """Extract structured contact and company info from bios.
 
     Returns a dict with any of these keys (only non-empty extractions):
         - given_name, family_name
@@ -137,15 +98,15 @@ Return JSON only, no explanation. Use exactly these keys (omit any that are empt
   "company_location": "city, country"
 }}"""
 
-    client = _get_anthropic_client()
-    response = await _call_with_retry(
+    client = await llm.get_llm_client(settings.LLM_MODEL_FAST)
+    raw = await llm.complete_with_retry(
         client,
-        model=_MODEL,
+        model=settings.LLM_MODEL_FAST,
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
+        timeout=settings.LLM_TIMEOUT_BIO_EXTRACTOR,
     )
 
-    raw = response.content[0].text
     parsed = _parse_json_response(raw)
     if not isinstance(parsed, dict):
         return {}

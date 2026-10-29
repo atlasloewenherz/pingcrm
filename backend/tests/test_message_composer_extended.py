@@ -2,7 +2,7 @@
 
 Covers compose_followup_message with:
 - Contact not found -> ValueError
-- No API key (Anthropic raises AuthenticationError)
+- LLM failure or provider misconfiguration falls back to template text
 - Successful mocked API call returns trimmed text
 - Correct model and max_tokens passed to Anthropic
 - All three trigger types (time_based, event_based, scheduled)
@@ -29,6 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.contact import Contact
 from app.models.interaction import Interaction
+from app.core.config import settings
+from app.services.llm import LLMError
 from app.services.message_composer import (
     analyze_conversation_tone,
     compose_followup_message,
@@ -81,13 +83,6 @@ def _make_contact(
     return c
 
 
-def _mock_anthropic_response(text: str) -> MagicMock:
-    """Build a MagicMock that looks like an anthropic.Message response."""
-    response = MagicMock()
-    response.content = [MagicMock(text=text)]
-    return response
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -130,17 +125,13 @@ async def test_compose_followup_message_contact_not_found_mocked(mock_db: AsyncM
     contact_result.scalar_one_or_none.return_value = None
     mock_db.execute = AsyncMock(return_value=contact_result)
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic"):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
-
-        with pytest.raises(ValueError, match="not found"):
-            await compose_followup_message(
-                contact_id=uuid.uuid4(),
-                trigger_type="time_based",
-                event_summary=None,
-                db=mock_db,
-            )
+    with pytest.raises(ValueError, match="not found"):
+        await compose_followup_message(
+            contact_id=uuid.uuid4(),
+            trigger_type="time_based",
+            event_summary=None,
+            db=mock_db,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -148,42 +139,65 @@ async def test_compose_followup_message_contact_not_found_mocked(mock_db: AsyncM
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_compose_followup_no_api_key_returns_fallback(mock_db: AsyncMock):
-    """When ANTHROPIC_API_KEY is empty, the composer returns a fallback message."""
+async def test_compose_followup_llm_failure_returns_fallback(
+    mock_db: AsyncMock, fake_llm_client
+):
+    """A failed LLM call degrades to the template fallback."""
     contact = _make_contact()
     _configure_db(mock_db, contact, [])
+    fake_llm_client.responses = [LLMError("no credentials", status_code=401)]
 
-    with patch("app.services.message_composer.settings") as mock_settings:
-        mock_settings.ANTHROPIC_API_KEY = ""
+    result = await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
-        result = await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
     assert "Jane" in result
     assert "check in" in result.lower()
 
 
 @pytest.mark.asyncio
-async def test_compose_followup_empty_api_key_skips_anthropic(mock_db: AsyncMock):
-    """When ANTHROPIC_API_KEY is empty, Anthropic client is never instantiated."""
+async def test_compose_timeout_comes_from_settings(
+    mock_db: AsyncMock, fake_llm_client, monkeypatch
+):
+    """The composer must pass settings.LLM_TIMEOUT_MESSAGE_COMPOSER to the client."""
+    monkeypatch.setattr(settings, "LLM_TIMEOUT_MESSAGE_COMPOSER", 123.0)
+    contact = _make_contact()
+    _configure_db(mock_db, contact, [])
+    fake_llm_client.response = "Hi Jane!"
+
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
+
+    assert fake_llm_client.last_call["timeout"] == 123.0
+
+
+@pytest.mark.asyncio
+async def test_compose_followup_client_construction_failure_returns_fallback(
+    mock_db: AsyncMock, monkeypatch
+):
+    """A provider misconfiguration degrades to the template fallback."""
     contact = _make_contact()
     _configure_db(mock_db, contact, [])
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic") as mock_ctor:
-        mock_settings.ANTHROPIC_API_KEY = ""
+    async def _raise(_model: str):
+        raise ValueError("no credentials configured")
 
-        result = await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
+    monkeypatch.setattr("app.services.llm.get_llm_client", _raise)
 
-    mock_ctor.assert_not_called()
+    result = await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
+
     assert "Jane" in result
 
 
@@ -192,51 +206,41 @@ async def test_compose_followup_empty_api_key_skips_anthropic(mock_db: AsyncMock
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_compose_followup_success_returns_stripped_text(mock_db: AsyncMock):
+async def test_compose_followup_success_returns_stripped_text(mock_db: AsyncMock, fake_llm_client):
     """Result is the trimmed content[0].text from the API response."""
     contact = _make_contact()
     _configure_db(mock_db, contact, [])
 
     expected = "Hi Jane, hope things are going well!"
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response(f"\n  {expected}\n"))
+    fake_llm_client.response = f"\n  {expected}\n"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
-
-        result = await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
+    result = await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
     assert result == expected
 
 
 @pytest.mark.asyncio
-async def test_compose_followup_uses_correct_model_and_token_limit(mock_db: AsyncMock):
-    """Anthropic messages.create must use claude-sonnet-4-6 with max_tokens=200."""
+async def test_compose_followup_uses_correct_model_and_token_limit(mock_db: AsyncMock, fake_llm_client):
+    """The configured draft model must be used with max_tokens=200."""
     contact = _make_contact()
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("ok"))
+    fake_llm_client.response = "ok"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
-        await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
-
-    kwargs = mock_client.messages.create.call_args.kwargs
-    assert kwargs["model"] == "claude-sonnet-4-6"
+    kwargs = fake_llm_client.last_call
+    assert kwargs["model"] == settings.LLM_MODEL_DRAFT
     assert kwargs["max_tokens"] == 200
 
 
@@ -254,51 +258,42 @@ async def test_compose_followup_all_trigger_types(
     mock_db: AsyncMock,
     trigger_type: str,
     event_summary: str | None,
+    fake_llm_client,
 ):
     """All trigger types complete without error and return a non-empty string."""
     contact = _make_contact()
     _configure_db(mock_db, contact, [])
 
     text = f"Message for {trigger_type}."
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response(text))
+    fake_llm_client.response = text
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
-
-        result = await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type=trigger_type,
-            event_summary=event_summary,
-            db=mock_db,
-        )
+    result = await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type=trigger_type,
+        event_summary=event_summary,
+        db=mock_db,
+    )
 
     assert result == text
 
 
 @pytest.mark.asyncio
-async def test_compose_followup_event_based_includes_summary_in_prompt(mock_db: AsyncMock):
+async def test_compose_followup_event_based_includes_summary_in_prompt(mock_db: AsyncMock, fake_llm_client):
     """For event_based triggers the event_summary must appear in the API prompt."""
     contact = _make_contact()
     _configure_db(mock_db, contact, [])
 
     event_summary = "Jane was promoted to VP of Engineering."
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Congrats!"))
+    fake_llm_client.response = "Congrats!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="event_based",
+        event_summary=event_summary,
+        db=mock_db,
+    )
 
-        await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="event_based",
-            event_summary=event_summary,
-            db=mock_db,
-        )
-
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert event_summary in prompt
 
 
@@ -307,7 +302,7 @@ async def test_compose_followup_event_based_includes_summary_in_prompt(mock_db: 
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_compose_followup_formal_tone_in_prompt(mock_db: AsyncMock):
+async def test_compose_followup_formal_tone_in_prompt(mock_db: AsyncMock, fake_llm_client):
     """Formal interactions produce a prompt containing the word 'formal'."""
     contact = _make_contact()
     formal_interactions = [
@@ -317,26 +312,21 @@ async def test_compose_followup_formal_tone_in_prompt(mock_db: AsyncMock):
     ]
     _configure_db(mock_db, contact, formal_interactions)
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Formal reply."))
+    fake_llm_client.response = "Formal reply."
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
-        await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
-
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "formal" in prompt.lower()
 
 
 @pytest.mark.asyncio
-async def test_compose_followup_casual_tone_in_prompt(mock_db: AsyncMock):
+async def test_compose_followup_casual_tone_in_prompt(mock_db: AsyncMock, fake_llm_client):
     """Casual interactions produce a prompt containing the word 'casual'."""
     contact = _make_contact()
     casual_interactions = [
@@ -348,21 +338,16 @@ async def test_compose_followup_casual_tone_in_prompt(mock_db: AsyncMock):
     ]
     _configure_db(mock_db, contact, casual_interactions)
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Casual reply."))
+    fake_llm_client.response = "Casual reply."
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
-        await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
-
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "casual" in prompt.lower()
 
 
@@ -371,73 +356,58 @@ async def test_compose_followup_casual_tone_in_prompt(mock_db: AsyncMock):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_compose_followup_contact_first_name_in_prompt(mock_db: AsyncMock):
+async def test_compose_followup_contact_first_name_in_prompt(mock_db: AsyncMock, fake_llm_client):
     """The contact's first name must appear in the constructed prompt."""
     contact = _make_contact(full_name="Alice Wonderland", given_name="Alice")
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hi Alice!"))
+    fake_llm_client.response = "Hi Alice!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="scheduled",
+        event_summary=None,
+        db=mock_db,
+    )
 
-        await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="scheduled",
-            event_summary=None,
-            db=mock_db,
-        )
-
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "Alice" in prompt
 
 
 @pytest.mark.asyncio
-async def test_compose_followup_no_given_name_uses_first_token_of_full_name(mock_db: AsyncMock):
+async def test_compose_followup_no_given_name_uses_first_token_of_full_name(mock_db: AsyncMock, fake_llm_client):
     """When given_name is None the first word of full_name is used as the first name."""
     contact = _make_contact(full_name="Robert Tables", given_name=None)
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hi Robert!"))
+    fake_llm_client.response = "Hi Robert!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
-
-        result = await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
+    result = await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
     assert result == "Hi Robert!"
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "Robert" in prompt
 
 
 @pytest.mark.asyncio
-async def test_compose_followup_no_company_no_title(mock_db: AsyncMock):
+async def test_compose_followup_no_company_no_title(mock_db: AsyncMock, fake_llm_client):
     """A contact without a company or title should still generate a message without error."""
     contact = _make_contact(company=None, title=None)
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey Jane!"))
+    fake_llm_client.response = "Hey Jane!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
-
-        result = await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
+    result = await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
     assert result == "Hey Jane!"
 
@@ -447,7 +417,7 @@ async def test_compose_followup_no_company_no_title(mock_db: AsyncMock):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_compose_followup_preferred_channel_from_most_recent_interaction(mock_db: AsyncMock):
+async def test_compose_followup_preferred_channel_from_most_recent_interaction(mock_db: AsyncMock, fake_llm_client):
     """The platform of the first (most-recent) interaction is used as preferred channel."""
     contact = _make_contact()
     interactions = [
@@ -456,45 +426,35 @@ async def test_compose_followup_preferred_channel_from_most_recent_interaction(m
     ]
     _configure_db(mock_db, contact, interactions)
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey!"))
+    fake_llm_client.response = "Hey!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
-        await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
-
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "telegram" in prompt.lower()
 
 
 @pytest.mark.asyncio
-async def test_compose_followup_no_interactions_defaults_channel_to_email(mock_db: AsyncMock):
+async def test_compose_followup_no_interactions_defaults_channel_to_email(mock_db: AsyncMock, fake_llm_client):
     """When there are no interactions, the preferred channel defaults to 'email'."""
     contact = _make_contact()
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey!"))
+    fake_llm_client.response = "Hey!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
 
-        await compose_followup_message(
-            contact_id=contact.id,
-            trigger_type="time_based",
-            event_summary=None,
-            db=mock_db,
-        )
-
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "email" in prompt.lower()
 
 
@@ -569,18 +529,14 @@ _FAKE_TWEETS = [
 
 
 @pytest.mark.asyncio
-async def test_twitter_context_included_for_time_based(mock_db: AsyncMock):
+async def test_twitter_context_included_for_time_based(mock_db: AsyncMock, fake_llm_client):
     """For time_based triggers, recent tweets are fetched and included in the prompt."""
     contact = _make_contact(twitter_handle="janesmith", twitter_bio="CTO at Acme")
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey Jane!"))
+    fake_llm_client.response = "Hey Jane!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client), \
-         patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=_FAKE_TWEETS):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    with patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=_FAKE_TWEETS):
 
         await compose_followup_message(
             contact_id=contact.id,
@@ -589,7 +545,7 @@ async def test_twitter_context_included_for_time_based(mock_db: AsyncMock):
             db=mock_db,
         )
 
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "RECENT TWITTER ACTIVITY" in prompt
     assert "Excited to launch our new AI product!" in prompt
     assert "CTO at Acme" in prompt
@@ -602,19 +558,15 @@ async def test_twitter_context_included_for_time_based(mock_db: AsyncMock):
     ("scheduled", None),
 ])
 async def test_twitter_context_included_for_all_triggers(
-    mock_db: AsyncMock, trigger_type: str, event_summary: str | None,
+    mock_db: AsyncMock, trigger_type: str, event_summary: str | None, fake_llm_client,
 ):
     """Twitter context is fetched for every trigger type, not just time_based."""
     contact = _make_contact(twitter_handle="janesmith", twitter_bio="CTO at Acme")
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey!"))
+    fake_llm_client.response = "Hey!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client), \
-         patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=_FAKE_TWEETS) as mock_fetch:
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    with patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=_FAKE_TWEETS) as mock_fetch:
 
         await compose_followup_message(
             contact_id=contact.id,
@@ -624,24 +576,20 @@ async def test_twitter_context_included_for_all_triggers(
         )
 
     mock_fetch.assert_called_once()
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "RECENT TWITTER ACTIVITY" in prompt
     assert "Excited to launch our new AI product!" in prompt
 
 
 @pytest.mark.asyncio
-async def test_twitter_context_skipped_no_handle(mock_db: AsyncMock):
+async def test_twitter_context_skipped_no_handle(mock_db: AsyncMock, fake_llm_client):
     """Contact without twitter_handle — no Twitter API call made."""
     contact = _make_contact(twitter_handle=None)
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey Jane!"))
+    fake_llm_client.response = "Hey Jane!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client), \
-         patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock) as mock_fetch:
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    with patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock) as mock_fetch:
 
         await compose_followup_message(
             contact_id=contact.id,
@@ -705,7 +653,7 @@ def test_should_anchor_ignores_unparseable_dates():
 
 
 @pytest.mark.asyncio
-async def test_anchor_instruction_in_prompt_when_fresh_tweet_and_stale_convo(mock_db: AsyncMock):
+async def test_anchor_instruction_in_prompt_when_fresh_tweet_and_stale_convo(mock_db: AsyncMock, fake_llm_client):
     """Prompt must tell the LLM to anchor on Twitter when convo is 90+ days old and a tweet is <30 days."""
     contact = _make_contact(
         twitter_handle="janesmith",
@@ -714,13 +662,9 @@ async def test_anchor_instruction_in_prompt_when_fresh_tweet_and_stale_convo(moc
     _configure_db(mock_db, contact, [])
 
     fresh_tweets = [_tweet_n_days_ago(5, "Raised a Series A today!")]
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Congrats!"))
+    fake_llm_client.response = "Congrats!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client), \
-         patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=fresh_tweets):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    with patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=fresh_tweets):
 
         await compose_followup_message(
             contact_id=contact.id,
@@ -729,13 +673,13 @@ async def test_anchor_instruction_in_prompt_when_fresh_tweet_and_stale_convo(moc
             db=mock_db,
         )
 
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "Anchor the message on the fresh Twitter signal" in prompt
     assert "Do NOT reopen the stale thread" in prompt
 
 
 @pytest.mark.asyncio
-async def test_anchor_instruction_absent_when_convo_is_recent(mock_db: AsyncMock):
+async def test_anchor_instruction_absent_when_convo_is_recent(mock_db: AsyncMock, fake_llm_client):
     """No anchor instruction when the last conversation is within the stale window."""
     contact = _make_contact(
         twitter_handle="janesmith",
@@ -744,13 +688,9 @@ async def test_anchor_instruction_absent_when_convo_is_recent(mock_db: AsyncMock
     _configure_db(mock_db, contact, [])
 
     fresh_tweets = [_tweet_n_days_ago(5)]
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey!"))
+    fake_llm_client.response = "Hey!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client), \
-         patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=fresh_tweets):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    with patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=fresh_tweets):
 
         await compose_followup_message(
             contact_id=contact.id,
@@ -759,7 +699,7 @@ async def test_anchor_instruction_absent_when_convo_is_recent(mock_db: AsyncMock
             db=mock_db,
         )
 
-    prompt = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    prompt = fake_llm_client.last_call["messages"][0]["content"]
     assert "Anchor the message on the fresh Twitter signal" not in prompt
 
 
@@ -769,7 +709,7 @@ async def test_anchor_instruction_absent_when_convo_is_recent(mock_db: AsyncMock
 
 
 @pytest.mark.asyncio
-async def test_compose_passes_user_to_cached_tweets(mock_db: AsyncMock):
+async def test_compose_passes_user_to_cached_tweets(mock_db: AsyncMock, fake_llm_client):
     """The User object given to compose_followup_message must reach _get_cached_tweets.
 
     Without this, bird CLI is silently skipped because get_cookies() only works
@@ -779,13 +719,9 @@ async def test_compose_passes_user_to_cached_tweets(mock_db: AsyncMock):
     _configure_db(mock_db, contact, [])
     sentinel_user = MagicMock(name="sentinel_user")
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey!"))
+    fake_llm_client.response = "Hey!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client), \
-         patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=[]) as mock_fetch:
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    with patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, return_value=[]) as mock_fetch:
 
         await compose_followup_message(
             contact_id=contact.id,
@@ -820,18 +756,14 @@ async def test_get_cached_tweets_warns_when_user_missing(caplog):
 
 
 @pytest.mark.asyncio
-async def test_twitter_fetch_failure_doesnt_block(mock_db: AsyncMock):
+async def test_twitter_fetch_failure_doesnt_block(mock_db: AsyncMock, fake_llm_client):
     """When _get_cached_tweets raises, message is still generated."""
     contact = _make_contact(twitter_handle="janesmith")
     _configure_db(mock_db, contact, [])
 
-    mock_client = MagicMock()
-    mock_client.messages.create = AsyncMock(return_value=_mock_anthropic_response("Hey Jane!"))
+    fake_llm_client.response = "Hey Jane!"
 
-    with patch("app.services.message_composer.settings") as mock_settings, \
-         patch("anthropic.AsyncAnthropic", return_value=mock_client), \
-         patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, side_effect=RuntimeError("CLI failed")):
-        mock_settings.ANTHROPIC_API_KEY = "sk-ant-test-key"
+    with patch("app.services.message_composer._get_cached_tweets", new_callable=AsyncMock, side_effect=RuntimeError("CLI failed")):
 
         result = await compose_followup_message(
             contact_id=contact.id,

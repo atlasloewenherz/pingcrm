@@ -87,7 +87,7 @@ PingCRM is a three-tier application: a Next.js frontend communicates with a Fast
                           └──────────────────────┘
 ```
 
-External services: Gmail API (OAuth), Telegram MTProto (Telethon), Twitter/X via Bird CLI (primary, cookie-based) with Twitter API v2 (OAuth 2.0 PKCE) as fallback, Anthropic Claude API (event classification and message composition), and a Chrome extension for LinkedIn profile data ingestion.
+External services: Gmail API (OAuth), Telegram MTProto (Telethon), Twitter/X via Bird CLI (primary, cookie-based) with Twitter API v2 (OAuth 2.0 PKCE) as fallback, your configured LLM provider (Anthropic by default, or any OpenAI-compatible endpoint) for event classification and message composition, and a Chrome extension for LinkedIn profile data ingestion.
 
 ---
 
@@ -263,7 +263,7 @@ def sync_gmail_all() -> dict:
 
 ## AI Pipeline
 
-All AI features use the Anthropic Claude API.
+All AI features call the configured LLM provider — Anthropic by default, or any OpenAI-compatible server selected through `LLM_BASE_URL` and the `LLM_MODEL_DRAFT`/`LLM_MODEL_FAST` prefixes. See the [setup guide](setup.md#llm-provider-anthropic--openai-compatible).
 
 ### Event Classification
 

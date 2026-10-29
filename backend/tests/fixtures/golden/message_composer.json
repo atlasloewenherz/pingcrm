@@ -1,0 +1,49 @@
+{
+  "task": "message_composer",
+  "model_role": "LLM_MODEL_DRAFT",
+  "description": "Draft a short, personalised follow-up message.",
+  "input": {
+    "contact": {
+      "full_name": "Ada Lovelace",
+      "given_name": "Ada",
+      "company": "Analytical Engines",
+      "title": "Founder & CTO",
+      "relationship_score": 8,
+      "last_interaction_days_ago": 200,
+      "twitter_bio": "Building analytical engines for computational research."
+    },
+    "interactions": [
+      {
+        "content_preview": "Great chatting about compiler design and the new engine!",
+        "direction": "inbound",
+        "platform": "email",
+        "days_ago": 200
+      }
+    ],
+    "trigger_type": "event_based",
+    "event_summary": "Ada's company raised a $12M Series A led by Matrix."
+  },
+  "fake_response": "Hey Ada, congratulations on the Series A! Would love to hear how the new engine and infrastructure work are going.",
+  "expected": {
+    "type": "text",
+    "min_length": 40,
+    "forbidden_substrings": [
+      "[Name]",
+      "\u2014",
+      "\u2013"
+    ],
+    "keyword_groups": [
+      [
+        "ada"
+      ],
+      [
+        "series a",
+        "congrat",
+        "funding",
+        "raise",
+        "round",
+        "engine"
+      ]
+    ]
+  }
+}

@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.core.middleware import NoStoreCacheMiddleware, RequestCorrelationMiddleware
 from app.core.version import APP_VERSION
+from app.services.llm import validate_llm_config
 from app.api.auth import router as auth_router
 from app.api.contacts import router as contacts_router
 from app.api.identity import router as identity_router
@@ -42,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    validate_llm_config()
     if (
         not settings.SECRET_KEY
         or settings.SECRET_KEY == "change-me-in-production"

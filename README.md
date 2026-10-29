@@ -52,7 +52,7 @@ See the [feature docs](https://docs.pingcrm.xyz/features/dashboard) for screensh
 | **Fly.io** | `fly launch --from https://github.com/sneg55/pingcrm` |
 | **Coolify** (self-hosted) | [Import as Docker Compose app](https://coolify.io/docs/applications/) |
 
-After deploy, set `ANTHROPIC_API_KEY` and any OAuth credentials for integrations you want. [Environment reference →](https://docs.pingcrm.xyz/setup#environment-variables)
+After deploy, set `LLM_API_KEY` (or the legacy `ANTHROPIC_API_KEY`) and any OAuth credentials for integrations you want. [Environment reference →](https://docs.pingcrm.xyz/setup#environment-variables)
 
 ### Option 2 — Have an AI agent deploy it
 
@@ -74,6 +74,38 @@ docker compose up -d
 
 Full walk-through with integration setup: **[docs.pingcrm.xyz/setup](https://docs.pingcrm.xyz/setup)**
 
+### Configuring the LLM provider
+
+AI features need one LLM provider. Anthropic is the default:
+
+```env
+LLM_API_KEY=your_anthropic_key
+# or the legacy name, still honoured for Anthropic:
+# ANTHROPIC_API_KEY=your_anthropic_key
+```
+
+Any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM, ...) works by pointing
+`LLM_BASE_URL` at it and prefixing both model IDs:
+
+```env
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_API_KEY=
+LLM_MODEL_DRAFT=ollama/llama3
+LLM_MODEL_FAST=ollama/llama3
+LLM_ALLOW_EMPTY_KEY=true
+```
+
+The provider is selected from the model prefix — `anthropic/`, `openai/`,
+`ollama/`, or `vllm/` — rather than a separate provider flag, so the model ID
+is the single source of truth and a typo fails at startup instead of silently
+routing to the wrong backend. `LLM_ALLOW_EMPTY_KEY=true` exists only for
+self-hosted servers that accept no key (localhost or a trusted LAN); do not
+enable it for a remote endpoint that requires authentication.
+
+`LLM_MAX_CONCURRENCY` defaults to `5` and is shared by every service using the
+same provider config. To match prior peak concurrency, set
+`LLM_MAX_CONCURRENCY=10`.
+
 ### Staying up to date
 
 PingCRM checks GitHub for new releases and shows an in-app banner when one
@@ -84,7 +116,7 @@ for details and opt-out.
 
 ## Stack
 
-**Backend:** FastAPI · PostgreSQL · Redis · Celery · Claude (Anthropic)
+**Backend:** FastAPI · PostgreSQL · Redis · Celery · Anthropic (default) or any OpenAI-compatible LLM
 **Frontend:** Next.js · React · Tailwind
 **Deploy:** Docker Compose · Caddy · GitHub Actions
 

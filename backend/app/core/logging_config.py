@@ -12,6 +12,68 @@ import os
 from pathlib import Path
 
 
+# Keys whose values can carry user message content or prompts. The LLM SDKs
+# log request payloads at DEBUG; even at WARNING, application loggers may pass
+# a request dict as a formatting argument. Handlers redact these centrally so a
+# single leaked log call cannot put contact message bodies on disk.
+_SENSITIVE_KEYS = frozenset(
+    {
+        "body",
+        "content",
+        "input",
+        "messages",
+        "prompt",
+        "system",
+        "system_prompt",
+        "text",
+    }
+)
+
+_REDACTED = "[REDACTED]"
+
+
+def _redact_value(value):
+    """Recursively replace sensitive dict values with ``[REDACTED]``."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                _REDACTED
+                if isinstance(key, str) and key.lower() in _SENSITIVE_KEYS
+                else _redact_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    return value
+
+
+class RedactMessagesFilter(logging.Filter):
+    """Strip message/prompt content from every record passing a handler.
+
+    Attached to handlers rather than loggers: a logger-level filter would be
+    bypassed by propagation, whereas every emitted record must pass through a
+    handler to reach stdout or the log file.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = _redact_value(record.args)
+            else:
+                record.args = tuple(_redact_value(arg) for arg in record.args)
+
+        # ``logger.info("...", extra={"messages": ...})`` lands directly in the
+        # record's __dict__, not in args.
+        for key in list(record.__dict__):
+            if key.lower() in _SENSITIVE_KEYS:
+                record.__dict__[key] = _REDACTED
+
+        return True
+
+
 def _has_json_logger() -> bool:
     try:
         import pythonjsonlogger.jsonlogger  # noqa: F401
@@ -97,6 +159,11 @@ def setup_logging() -> None:
             "httpcore": {"level": "WARNING"},
             "hpack": {"level": "WARNING"},
             "telethon": {"level": "WARNING"},
+            # LLM SDKs log full request bodies (including prompts and contact
+            # message content) at DEBUG/INFO. Keep them at WARNING regardless
+            # of LOG_LEVEL; RedactMessagesFilter is the second line of defense.
+            "anthropic": {"level": "WARNING"},
+            "openai": {"level": "WARNING"},
         },
         "root": {
             "level": log_level,
@@ -109,5 +176,10 @@ def setup_logging() -> None:
     # Add correlation filter to all handlers so request_id/task_id appear in logs
     from app.core.request_context import CorrelationFilter
     correlation_filter = CorrelationFilter()
+    redact_filter = RedactMessagesFilter()
     for handler in logging.root.handlers:
         handler.addFilter(correlation_filter)
+        # setup_logging() can run more than once (e.g. re-imported app modules
+        # in tests); don't stack duplicate filters.
+        if not any(isinstance(f, RedactMessagesFilter) for f in handler.filters):
+            handler.addFilter(redact_filter)
