@@ -10,8 +10,6 @@ from app.services import llm
 
 logger = logging.getLogger(__name__)
 
-_LLM_TIMEOUT = 30.0
-
 
 def _parse_json_response(raw: str) -> Any:
     """Parse JSON from LLM response, handling markdown code fences."""
@@ -106,7 +104,7 @@ Return JSON only, no explanation. Use exactly these keys (omit any that are empt
         model=settings.LLM_MODEL_FAST,
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
-        timeout=_LLM_TIMEOUT,
+        timeout=settings.LLM_TIMEOUT_BIO_EXTRACTOR,
     )
 
     parsed = _parse_json_response(raw)

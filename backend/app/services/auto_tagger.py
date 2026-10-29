@@ -12,11 +12,6 @@ logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 50
 
-# LLM call timeouts. Tagging and taxonomy passes historically used a longer
-# timeout than the other services because batches can be large.
-_TAXONOMY_TIMEOUT = 60.0
-_ASSIGN_TIMEOUT = 60.0
-
 
 def _parse_json_response(raw: str) -> Any:
     """Parse JSON from LLM response, handling markdown code fences."""
@@ -153,7 +148,7 @@ async def discover_taxonomy(
                 model=settings.LLM_MODEL_FAST,
                 max_tokens=2048,
                 messages=[{"role": "user", "content": prompt}],
-                timeout=_TAXONOMY_TIMEOUT,
+                timeout=settings.LLM_TIMEOUT_TAXONOMY,
             )
             parsed = _parse_json_response(raw)
 
@@ -224,7 +219,7 @@ async def deduplicate_taxonomy(
             model=settings.LLM_MODEL_FAST,
             max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
-            timeout=_TAXONOMY_TIMEOUT,
+            timeout=settings.LLM_TIMEOUT_TAXONOMY,
         )
         parsed = _parse_json_response(raw)
 
@@ -297,7 +292,7 @@ async def assign_tags(
             model=settings.LLM_MODEL_FAST,
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
-            timeout=_ASSIGN_TIMEOUT,
+            timeout=settings.LLM_TIMEOUT_TAG_ASSIGNMENT,
         )
         parsed = _parse_json_response(raw)
 

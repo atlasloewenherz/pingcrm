@@ -18,8 +18,6 @@ from app.services import llm
 
 logger = logging.getLogger(__name__)
 
-_COMPOSE_TIMEOUT = 30.0
-
 
 _TWEET_CACHE_TTL = 12 * 60 * 60  # 12 hours
 
@@ -350,7 +348,7 @@ Message:"""
             model=settings.LLM_MODEL_DRAFT,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
-            timeout=_COMPOSE_TIMEOUT,
+            timeout=settings.LLM_TIMEOUT_MESSAGE_COMPOSER,
         )
         draft = draft.strip()
     except Exception:

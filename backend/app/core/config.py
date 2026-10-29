@@ -71,7 +71,20 @@ class Settings(BaseSettings):
     # /v1/messages endpoint has no response_format parameter.
     LLM_STRUCTURED_OUTPUT: str = "none"
     LLM_TIMEOUT: float = 30.0
+    # Total attempts, not retries after the first try: LLM_MAX_RETRIES=3 means
+    # at most 3 calls (2 retries), matching complete_with_retry's max_attempts.
     LLM_MAX_RETRIES: int = 3
+    # Per-call-site timeout overrides. Each defaults to the value the service used
+    # before migration — taxonomy/tag-assignment calls can involve larger batches
+    # and have historically used a longer timeout than the other services.
+    # LLM_TIMEOUT (above) remains the floor used only if a caller passes
+    # timeout=None; every current call site passes one of these explicitly.
+    LLM_TIMEOUT_BIO_EXTRACTOR: float = 30.0
+    LLM_TIMEOUT_EVENT_CLASSIFIER: float = 30.0
+    LLM_TIMEOUT_TAXONOMY: float = 60.0
+    LLM_TIMEOUT_TAG_ASSIGNMENT: float = 60.0
+    LLM_TIMEOUT_MESSAGE_COMPOSER: float = 30.0
+    LLM_TIMEOUT_MEETING_PREP: float = 30.0
     # Only for self-hosted, no-auth OpenAI-compatible servers (local Ollama,
     # vLLM on the LAN). Not a general escape hatch for remote endpoints.
     LLM_ALLOW_EMPTY_KEY: bool = False

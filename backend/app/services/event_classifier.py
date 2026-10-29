@@ -32,8 +32,6 @@ _SYSTEM_PROMPT = (
     "Your job is to classify signals from contact activity into structured events."
 )
 
-_LLM_TIMEOUT = 30.0
-
 
 def _parse_classifier_response(raw: str) -> dict[str, Any]:
     """Parse the JSON blob returned by the LLM.
@@ -81,7 +79,7 @@ async def _call_classifier(prompt: str) -> dict[str, Any]:
         max_tokens=256,
         system_prompt=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
-        timeout=_LLM_TIMEOUT,
+        timeout=settings.LLM_TIMEOUT_EVENT_CLASSIFIER,
     )
     return _parse_classifier_response(raw)
 

@@ -240,7 +240,7 @@ Talking points:"""
                 model=settings.LLM_MODEL_FAST,
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
-                timeout=30.0,
+                timeout=settings.LLM_TIMEOUT_MEETING_PREP,
             )
         ).strip()
     except Exception:
