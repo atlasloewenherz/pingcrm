@@ -328,6 +328,21 @@ class TestGenerateTalkingPoints:
         assert call["max_tokens"] == 300
 
     @pytest.mark.asyncio
+    async def test_timeout_comes_from_settings(self, fake_llm_client, monkeypatch):
+        """Talking-point generation must use settings.LLM_TIMEOUT_MEETING_PREP."""
+        from app.core.config import settings
+        from app.services.meeting_prep import generate_talking_points
+
+        monkeypatch.setattr(settings, "LLM_TIMEOUT_MEETING_PREP", 123.0)
+        fake_llm_client.response = "- Discuss the roadmap"
+
+        briefs = [{"name": "Alice", "score_label": "Warm"}]
+
+        await generate_talking_points(briefs, "Catch up")
+
+        assert fake_llm_client.last_call["timeout"] == 123.0
+
+    @pytest.mark.asyncio
     async def test_returns_empty_on_api_failure(self, fake_llm_client):
         """API exception → graceful degradation, returns empty string."""
         from app.services.llm import LLMError

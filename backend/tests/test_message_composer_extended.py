@@ -159,6 +159,26 @@ async def test_compose_followup_llm_failure_returns_fallback(
 
 
 @pytest.mark.asyncio
+async def test_compose_timeout_comes_from_settings(
+    mock_db: AsyncMock, fake_llm_client, monkeypatch
+):
+    """The composer must pass settings.LLM_TIMEOUT_MESSAGE_COMPOSER to the client."""
+    monkeypatch.setattr(settings, "LLM_TIMEOUT_MESSAGE_COMPOSER", 123.0)
+    contact = _make_contact()
+    _configure_db(mock_db, contact, [])
+    fake_llm_client.response = "Hi Jane!"
+
+    await compose_followup_message(
+        contact_id=contact.id,
+        trigger_type="time_based",
+        event_summary=None,
+        db=mock_db,
+    )
+
+    assert fake_llm_client.last_call["timeout"] == 123.0
+
+
+@pytest.mark.asyncio
 async def test_compose_followup_client_construction_failure_returns_fallback(
     mock_db: AsyncMock, monkeypatch
 ):

@@ -84,6 +84,18 @@ async def test_classify_bio_change_uses_draft_model(fake_llm_client):
 
 
 @pytest.mark.asyncio
+async def test_timeout_comes_from_settings(fake_llm_client, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_TIMEOUT_EVENT_CLASSIFIER", 123.0)
+    fake_llm_client.response = (
+        '{"event_type": "none", "confidence": 0.0, "summary": ""}'
+    )
+
+    await classify_tweet("Hello world", "testuser")
+
+    assert fake_llm_client.last_call["timeout"] == 123.0
+
+
+@pytest.mark.asyncio
 async def test_classify_tweet_llm_failure_returns_none(fake_llm_client):
     fake_llm_client.responses = [LLMError("authentication failed", status_code=401)]
 

@@ -238,6 +238,22 @@ async def test_discover_taxonomy_valid_response(fake_llm_client):
 
 
 @pytest.mark.asyncio
+async def test_timeouts_come_from_settings(fake_llm_client, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_TIMEOUT_TAXONOMY", 123.0)
+    monkeypatch.setattr(settings, "LLM_TIMEOUT_TAG_ASSIGNMENT", 456.0)
+    fake_llm_client.responses = [
+        '{"Role": ["CEO"]}',
+        '{"tags": ["CEO"], "new_tags": []}',
+    ]
+
+    await discover_taxonomy([{"full_name": "Alice", "title": "CEO"}])
+    assert fake_llm_client.last_call["timeout"] == 123.0
+
+    await assign_tags({"full_name": "Alice", "title": "CEO"}, {"Role": ["CEO"]})
+    assert fake_llm_client.last_call["timeout"] == 456.0
+
+
+@pytest.mark.asyncio
 async def test_discover_taxonomy_batching_60_contacts(fake_llm_client):
     """60 contacts with _BATCH_SIZE=50 should result in 2 API calls."""
     fake_llm_client.response = '{"Role": ["Engineer"]}'

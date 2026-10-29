@@ -37,6 +37,16 @@ async def test_extracts_structured_fields_from_fenced_json(fake_llm_client):
 
 
 @pytest.mark.asyncio
+async def test_timeout_comes_from_settings(fake_llm_client, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_TIMEOUT_BIO_EXTRACTOR", 123.0)
+    fake_llm_client.response = "{}"
+
+    await extract_from_bios(full_name="Ada Lovelace")
+
+    assert fake_llm_client.last_call["timeout"] == 123.0
+
+
+@pytest.mark.asyncio
 async def test_no_source_text_returns_empty_without_calling_llm(fake_llm_client):
     result = await extract_from_bios()
 
