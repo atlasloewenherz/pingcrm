@@ -157,6 +157,11 @@ authentication. Against a remote endpoint that requires a key, leaving the key
 empty with this flag enabled turns a clear construction-time error into an
 opaque `401`.
 
+Ollama Cloud (`https://ollama.com/v1`) is not documented here — its model-ID
+suffix convention (e.g. whether `:cloud` is required) has not been verified
+against a live request; treat it as unsupported until someone confirms a
+working config and adds it.
+
 #### Concurrency
 
 `LLM_MAX_CONCURRENCY` (default `5`) caps in-flight requests per provider
@@ -271,8 +276,17 @@ celery -A worker.celery_app worker --loglevel=info
 | `LLM_BASE_URL` | No | Base URL for an OpenAI-compatible provider; blank uses the provider default |
 | `LLM_MODEL_DRAFT` | No | Drafting model, prefixed with `anthropic/`, `openai/`, `ollama/`, or `vllm/` (default: `anthropic/claude-sonnet-4-6`) |
 | `LLM_MODEL_FAST` | No | Fast model for classification/extraction, same prefix convention (default: `anthropic/claude-haiku-4-5-20251001`) |
+| `LLM_STRUCTURED_OUTPUT` | No | Structured-output mode for OpenAI-compatible providers: `none`, `json_object`, or `json_schema`; Anthropic ignores it (default: `none`) |
+| `LLM_TIMEOUT` | No | Adapter-level fallback request timeout in seconds, used only when a call omits its own timeout (default: `30.0`) |
+| `LLM_MAX_RETRIES` | No | Total attempts per LLM call, not retries after the first try — counts total attempts (default: `3`) |
 | `LLM_ALLOW_EMPTY_KEY` | No | Allow an empty key for a self-hosted, no-auth OpenAI-compatible server (default: `false`) |
 | `LLM_MAX_CONCURRENCY` | No | Per-provider in-flight request cap shared across services (default: `5`; set `10` to match prior peak) |
+| `LLM_TIMEOUT_BIO_EXTRACTOR` | No | Timeout in seconds for bio extraction calls (default: `30.0`) |
+| `LLM_TIMEOUT_EVENT_CLASSIFIER` | No | Timeout in seconds for event classification calls (default: `30.0`) |
+| `LLM_TIMEOUT_TAXONOMY` | No | Timeout in seconds for tag taxonomy discovery and deduplication calls (default: `60.0`) |
+| `LLM_TIMEOUT_TAG_ASSIGNMENT` | No | Timeout in seconds for tag assignment calls (default: `60.0`) |
+| `LLM_TIMEOUT_MESSAGE_COMPOSER` | No | Timeout in seconds for follow-up message composition calls (default: `30.0`) |
+| `LLM_TIMEOUT_MEETING_PREP` | No | Timeout in seconds for meeting-prep talking-point generation calls (default: `30.0`) |
 | `APOLLO_API_KEY` | No | Apollo API key for contact enrichment |
 | `MAPBOX_SECRET_TOKEN` | No | Mapbox token used by the worker for geocoding (see [Map](features/map.md#configuration)) |
 | `MAPBOX_PUBLIC_TOKEN` | No | Mapbox token surfaced to the browser via `/api/v1/map/config` |
